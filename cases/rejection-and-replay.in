@@ -1,0 +1,15 @@
+point add P01 原料暂存点
+point add P02 装配线接收点
+application add APP-001 P01 P02
+application add APP-001 P01 P02
+application add APP-001 P02 P01
+application add APP-002 P01 P99
+application add APP-003 P01 P01
+point add P01 新名称
+point show P01
+application show APP-001
+application list
+application show APP-404
+unknown
+point add
+exit

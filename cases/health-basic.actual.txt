@@ -1,0 +1,32 @@
+HEALTH mode READ_WRITE
+HEALTH storage OK
+HEALTH points 0
+HEALTH applications 0 unknown=0
+HEALTH outbox total=0 pending=0 failed=0
+HEALTH inbox total=0 pending=0
+HEALTH workflows total=0 running=0
+HEALTH OVERALL OK
+OK POINT_ADDED P01
+OK POINT_ADDED P02
+OK APPLICATION_ADDED APP-001
+OK APPLICATION_DISPATCHED APP-001
+HEALTH mode READ_WRITE
+HEALTH storage OK
+HEALTH points 2
+HEALTH applications 1 unknown=0
+HEALTH outbox total=1 pending=0 failed=0
+HEALTH inbox total=0 pending=0
+HEALTH workflows total=0 running=0
+HEALTH OVERALL OK
+OK CALLBACK_RECEIVED APP-001 STARTED
+OK WORKFLOW_STARTED WF-APP-001
+OK WORKFLOW_ADVANCED WF-APP-001
+HEALTH mode READ_WRITE
+HEALTH storage OK
+HEALTH points 2
+HEALTH applications 1 unknown=0
+HEALTH outbox total=1 pending=0 failed=0
+HEALTH inbox total=1 pending=0
+HEALTH workflows total=1 running=1
+HEALTH OVERALL OK
+BYE

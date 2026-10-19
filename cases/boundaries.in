@@ -1,0 +1,14 @@
+
+  point   list  
+application list
+point
+point remove P01
+point show p01 extra
+POINT list
+exit extra
+point add P01 原料暂存点
+application add APP-010 P99 P98
+application add APP-011 P99 P99
+application show APP-404
+point show P99
+point list

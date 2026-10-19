@@ -1,0 +1,10 @@
+stats
+point add P01 原料暂存点
+point add P02 装配线接收点
+application add APP-001 P01 P02
+application dispatch APP-001
+application callback APP-001 STARTED
+workflow start APP-001
+workflow advance APP-001
+stats
+exit

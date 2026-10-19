@@ -1,0 +1,12 @@
+point list
+point add P02 装配线接收点
+point add P01 原料暂存点
+point show P01
+point list
+point add P01 新名称
+point show P01
+point show P99
+point add p03 错误编号
+point add
+point list
+exit

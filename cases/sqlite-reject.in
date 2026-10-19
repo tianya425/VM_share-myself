@@ -1,0 +1,6 @@
+point add P01 新名字
+application add APP-001 P01 P02
+application dispatch APP-002
+application callback APP-001 BOGUS
+workflow start APP-999
+exit

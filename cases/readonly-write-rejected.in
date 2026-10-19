@@ -1,0 +1,12 @@
+point add P01 原料暂存点
+application add APP-001 P01 P02
+application dispatch APP-001
+application query APP-001
+application callback APP-001 STARTED
+application execute APP-001
+application complete APP-001
+application cancel APP-001
+outbox process
+workflow start APP-001
+workflow advance APP-001
+exit

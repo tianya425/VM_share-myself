@@ -1,0 +1,9 @@
+point add P01 原料暂存点
+point add P02 装配线接收点
+application add APP-001 P01 P02
+application dispatch APP-001
+application callback APP-001 COMPLETED
+application show APP-001
+application callback APP-999 STARTED
+inbox list
+exit

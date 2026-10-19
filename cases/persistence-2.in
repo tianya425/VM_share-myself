@@ -1,0 +1,5 @@
+point list
+application list
+point add P01 新名字
+application add APP-001 P01 P02
+exit

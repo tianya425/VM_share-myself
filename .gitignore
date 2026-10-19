@@ -1,0 +1,12 @@
+out/
+*.class
+.idea/
+*.iml
+.vscode/
+data/
+*.db
+build/
+*.db-shm
+*.db-wal
+*.zip
+.DS_Store
