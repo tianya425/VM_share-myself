@@ -1,0 +1,14 @@
+point add P01 原料暂存点
+point add P02 装配线接收点
+application add APP-001 P01 P02
+application add APP-002 P01 P02
+application add APP-003 P01 P02
+application add APP-004 P01 P02
+application add APP-005 P01 P02
+application dispatch APP-001
+application dispatch APP-002
+application execute APP-002
+application complete APP-002
+application cancel APP-003
+stats
+exit

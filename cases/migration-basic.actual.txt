@@ -1,0 +1,9 @@
+MIGRATION status version=2
+MIGRATION list 2
+MIGRATION 1 create core tables
+MIGRATION 2 add note column to applications
+OK POINT_ADDED P01
+OK POINT_ADDED P02
+OK APPLICATION_ADDED APP-001
+MIGRATION status version=2
+BYE

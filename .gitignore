@@ -1,0 +1,12 @@
+out/
+*.class
+.idea/
+*.iml
+.vscode/
+data/
+*.db
+*.db-shm
+*.db-wal
+build/
+out-evidence/
+out-*.txt

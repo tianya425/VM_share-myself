@@ -1,0 +1,22 @@
+HEALTH mode READ_ONLY
+HEALTH storage OK
+HEALTH points 0
+HEALTH applications 0 unknown=0
+HEALTH outbox total=0 pending=0 uncertain=0 failed=0
+HEALTH inbox total=0 pending=0
+HEALTH workflows total=0 running=0
+HEALTH OVERALL OK
+ERR READ_ONLY
+POINTS 0
+ERR READ_ONLY
+APPLICATIONS 0
+STATS points 0
+STATS applications 0
+STATS applications_by_state CANCELLED=0 COMPLETED=0 CREATED=0 DISPATCHED=0 EXECUTING=0 UNKNOWN=0
+STATS outbox 0
+STATS outbox_by_status FAILED=0 PENDING=0 SENT=0 UNCERTAIN=0
+STATS inbox 0
+STATS inbox_by_status PENDING=0 PROCESSED=0 REJECTED=0
+STATS workflows 0
+STATS workflows_by_state CANCELLED=0 COMPLETED=0 FAILED=0 RUNNING=0
+BYE

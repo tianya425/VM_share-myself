@@ -1,0 +1,5 @@
+outbox list
+outbox process
+outbox list
+application show APP-001
+exit

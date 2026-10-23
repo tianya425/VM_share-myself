@@ -1,0 +1,7 @@
+health
+point add P01 原料暂存点
+point list
+application add APP-001 P01 P02
+application list
+stats
+exit
