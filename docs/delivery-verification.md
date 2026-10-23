@@ -243,7 +243,7 @@ REP-08 appState=UNKNOWN workflowState=RUNNING stepIndex=1 step0=COMPLETED verdic
 
 ---
 
-## 7. T1 红绿表（PR1 先红阶段，2026-10-23 实测）
+## 7. PR1 红绿表（先红阶段 + T2/T2b 收窄记录，2026-10-23 实测）
 
 ### 7.0 判据调整（已裁决）
 
@@ -251,10 +251,17 @@ REP-08 appState=UNKNOWN workflowState=RUNNING stepIndex=1 step0=COMPLETED verdic
 R1-REL-01 / 02 / 11 / 12 / 13 / 14 六项的字面要求在基线 `bdb30ea` 上**本来就成立**，
 无法在不削弱或扭曲断言的前提下凑成红。经裁决（2026-10-23），T1 判据改为：
 
-> **8 红 + 6 条基线已满足（转回归锚点）**
+> **8 红 + 6 条基线已满足（转回归锚点）** —— T1 阶段口径
 
 - 7.2 的 8 条 = T2—T6 必须转绿的整改项；
 - 7.3 的 6 条 = 不再属于"待修"，但**实现改动后必须仍然为绿**，用于捕获回归。
+
+**2026-10-23 晚 T2b 裁决（A 方案，用户书面批准）**：R1-REL-10 的五层 readonly 属 T2 范围，
+落地即转绿并移入 §7.3。判据正式改为：
+
+> **7 红 + 7 绿**：红集合 = R1-REL-03—09（T4/T5 的整改项）；锚点 = R1-REL-01/02/10/11/12/13/14。
+
+§7.1 的 8/6 是 T1 阶段历史实测，保留不改；T2b 之后的实时数字见 §7.5.4。
 
 ### 7.1 复跑方式与实测结果
 
@@ -284,8 +291,9 @@ java -cp "out/main:out/test:lib/sqlite-jdbc-3.46.1.3.jar" lab.ReliabilityCloseou
 > **数字巧合警告**：本节 `RELIABILITY_R1_CASES_PASSED=6` 与第 3 节基线记录里的
 > `RELIABILITY_CASES_PASSED=6` 含义不同——旧类是"6 个 case 全过（6/6）"，
 > 新类是"14 个 case 中 6 个过（6/14），另 8 个红"。复核时不要按数字误判。
+> （T2b 落地后本类为 **7/7**，见 §7.5.4。）
 
-### 7.2 8 条 FAIL（红）——T2—T6 的整改对账依据
+### 7.2 7 条 FAIL（红）——T4/T5 的整改对账依据
 
 | case | 真实失败行（逐字） | 断言意图 | 对应整改项 |
 |---|---|---|---|
@@ -296,47 +304,51 @@ java -cp "out/main:out/test:lib/sqlite-jdbc-3.46.1.3.jar" lab.ReliabilityCloseou
 | R1-REL-07 | `提交失败后内存申请状态=EXECUTING 期望回到已提交=DISPATCHED` | receiveCallback 提交失败：application 与 inbox 均不变 | T4 receiveCallback 单次提交 |
 | R1-REL-08 | `startWorkflow 失败后内存仍有 workflow（幽灵状态）` | startWorkflow/advanceWorkflow 提交失败：application、outbox、workflow 三者不变 | T4 start/advance 单次提交 |
 | R1-REL-09 | `超时后 stepIndex=1 期望=0 即 RUNNING 0/3（advanceWorkflow 未抛异常）` | 超时（UNKNOWN/UNCERTAIN）后 workflow 保持 RUNNING 0/3、step0 PENDING | REP-08（B-08/B-09/B-10） |
-| R1-REL-10 | `只读 SqliteStorage 允许 savePoints 成功（未抛 STORAGE_READ_ONLY）` | SqliteStorage(db,true) 直接写必须抛 STORAGE_READ_ONLY，库文件与 sidecar 字节不变 | REP-07（B-15/B-16） |
 
 > 失败行与断言意图成对出现在输出里（`R1-REL-XX FAIL: …` + `R1-REL-XX INTENT: …`），
-> 便于整改时逐条对账；8 条不是"坏掉的测试"，是 T2—T6 的验收面。
+> 便于整改时逐条对账；这 7 条不是"坏掉的测试"，是 T4/T5 的验收面。
 
-### 7.3 6 条 PASS（基线已满足，转回归锚点）
+> **R1-REL-10**（只读 SqliteStorage 可写）已于 **T2b** 转绿，从本表移入 §7.3 锚点表，
+> 见 §7.5.4。
 
-| case | 断言要点 | 基线为何已满足（合同依据 + 代码位置） | 回归锚定对象 |
+### 7.3 7 条锚点（实现改动后必须仍绿）
+
+| case | 断言要点 | 为什么满足（合同依据 + 代码位置） | 回归锚定对象 |
 |---|---|---|---|
-| R1-REL-01 | timeout-created 后 processOutbox：create 累计=1、query=1、申请 DISPATCHED、outbox SENT，内存=已提交，二次处理不再调外部 | S1/T4「PENDING 与 UNCERTAIN 都先 query，禁止直接 create」已实现：`Registry.processOutbox` 的 UNCERTAIN 分支只调 `queryOrder`（Registry.java:309-329） | 对账路径不得退化为"UNCERTAIN 重发 create" |
-| R1-REL-02 | point 保存失败后内存与已提交均无 P01，且失败后实例可继续使用 | S1/T2+T4「深拷贝候选 → 只改候选 → commitState → 成功后才发布内存」对单集合已成立：`registerPoint` 先建候选 Map、`storage.savePoints` 成功后才 `points.put`（Registry.java:67-71） | 引入 `commitState` 后不得出现"失败仍发布" |
-| R1-REL-11 | 只读 + 库不存在：`READ_ONLY_STORAGE_NOT_FOUND`，不建目录、不建文件，临时目录零残留 | S1/T3「五层 readonly：文件必须存在」已成立：`SqliteStorage(Path,true)` 先用 `Files.exists` 判定再抛 `READ_ONLY_STORAGE_NOT_FOUND`，未走到 JDBC（SqliteStorage.java:86-90） | 只读判定重构后零建盘语义不得丢 |
-| R1-REL-12 | 注入失败迁移：失败迁移的表不存在、成功迁移保留、版本不前进、autoCommit 恢复；首条即失败时版本保持 0 | S1/T6「Migration 事务 + 异常 rollback + finally 恢复 autoCommit」已成立：`MigrationRunner.applyMigrationAtomically`（MigrationRunner.java:80-103） | 迁移事务与 autoCommit 恢复不得退化 |
-| R1-REL-13 | ProcessBuilder 跑 `lab.Main`：未知/重复/冲突参数 → 退出码 2，`ERR STARTUP_ARGUMENT <arg>` 或 `ERR STARTUP_CONFLICT <storage/fake>` 首行正确，且不进入命令循环（无 STATS/BYE） | S1/T6「启动参数 fail closed」已成立：`StartupOptions.parse`（StartupOptions.java:35-87）+ `Main` 先解析、失败即 `System.exit(2)` 后才建库与读 stdin（Main.java:17-26） | 参数校验不得被挪到建库之后或吞掉退出码 |
-| R1-REL-14 | 三步 workflow 后 application 与 workflow 同时 COMPLETED、索引 3/3、三步全 COMPLETED，内存=已提交 | S1/T5「步骤完成绑定真实业务转换」正向路径已成立：`advanceWorkflow` 先调 dispatch/execute/complete 再标本步完成（Registry.java:456-491） | 候选快照化后正向绑定不得丢 |
+| R1-REL-01 | timeout-created 后 processOutbox：create 累计=1、query=1、申请 DISPATCHED、outbox SENT，内存=已提交，二次处理不再调外部 | S1/T4「PENDING 与 UNCERTAIN 都先 query，禁止直接 create」在基线已实现：`Registry.processOutbox` 的 UNCERTAIN 分支只调 `queryOrder`（Registry.java:309-329） | 对账路径不得退化为"UNCERTAIN 重发 create" |
+| R1-REL-02 | point 保存失败后内存与已提交均无 P01，且失败后实例可继续使用 | S1/T2+T4「深拷贝候选 → 只改候选 → commitState → 成功后才发布内存」对单集合在基线已成立：`registerPoint` 先建候选 Map、`storage.savePoints` 成功后才 `points.put`（Registry.java:67-71） | 引入 `commitState` 后不得出现"失败仍发布" |
+| R1-REL-10 | SqliteStorage(db,true) 的 `commitState` 与兼容 `save*` 在写 SQL 前抛 `STORAGE_READ_ONLY`（含候选本身非法的情形）；只读打开/拒写/关闭后库文件与 sidecar 的 bytes+size+mtime 不变；空库只读打开不迁移 | **T2b 落地**：第 1 层 `NOFOLLOW` 普通文件判定、第 2 层 `SQLiteConfig.setReadOnly(true)`、第 3 层不迁移、第 4 层 `checkWritable()` 先于 SQL、第 5 层由 case 断言（SqliteStorage.java） | 只读隔离与零写盘语义不得退化 |
+| R1-REL-11 | 只读 + 库不存在 / 目标是目录 / 目标是符号链接：一律 `READ_ONLY_STORAGE_NOT_FOUND`，不建目录、不建文件；`lab.Main sqlite readonly` 缺库时非零退出、首行 `ERR READ_ONLY_STORAGE_NOT_FOUND`、不建 `data/` | S1/T3「五层 readonly」：`SqliteStorage(Path,true)` 用 `Files.isRegularFile(NOFOLLOW_LINKS)` 判定（SqliteStorage.java）；启动路径沿用 `Main` 的 `RegistryException → ERR + exit 1`（Main.java:29-36） | 只读判定重构后零建盘与错误码语义不得丢 |
+| R1-REL-12 | 注入失败迁移：失败迁移的表不存在、成功迁移保留、版本不前进、autoCommit 恢复；首条即失败时版本保持 0 | S1/T6「Migration 事务 + 异常 rollback + finally 恢复 autoCommit」在基线已成立：`MigrationRunner.applyMigrationAtomically`（MigrationRunner.java:80-103） | 迁移事务与 autoCommit 恢复不得退化 |
+| R1-REL-13 | ProcessBuilder 跑 `lab.Main`：未知/重复/冲突参数 → 退出码 2，`ERR STARTUP_ARGUMENT <arg>` 或 `ERR STARTUP_CONFLICT <storage/fake>` 首行正确，且不进入命令循环（无 STATS/BYE） | S1/T6「启动参数 fail closed」在基线已成立：`StartupOptions.parse`（StartupOptions.java:35-87）+ `Main` 先解析、失败即 `System.exit(2)` 后才建库与读 stdin（Main.java:17-26） | 参数校验不得被挪到建库之后或吞掉退出码 |
+| R1-REL-14 | 三步 workflow 后 application 与 workflow 同时 COMPLETED、索引 3/3、三步全 COMPLETED，内存=已提交 | S1/T5「步骤完成绑定真实业务转换」正向路径在基线已成立：`advanceWorkflow` 先调 dispatch/execute/complete 再标本步完成（Registry.java:456-491） | 候选快照化后正向绑定不得丢 |
 
-**声明**：以上 6 条作为**回归锚点**，T2—T6 任何实现改动（含 T2 引入 `commitState`、
-T3 三类 Storage 原子化、T4 八个写入口改造、T5 workflow 绑定、T6 迁移与启动参数）之后
-**必须仍然为绿**。任一条变红即视为回归，不得通过改测试或放宽断言消红。
+**声明**：以上 7 条作为**回归锚点**，T2b 及后续 T4—T6 任何实现改动（T4 八个写入口改造、
+T5 workflow 绑定、T6 迁移与启动参数）之后**必须仍然为绿**。任一条变红即视为回归，
+不得通过改测试或放宽断言消红。
 
-**已知盲区**（这 6 条不覆盖，需在 T2/T3/T6 另立 case，届时补入本表）：
+**已知盲区**（锚点不覆盖、需另立 case 的部分；2026-10-23 晚 T2b 后更新）：
 
 - 01：不覆盖"PENDING 也要先 query"（该形态由 05 的恢复段覆盖）；
-- 02：不覆盖 `commitState` 五集合单次提交、FileStorage staging+`ATOMIC_MOVE`、SQLite 单事务（现在的 `Storage` API 表达不出来）；
-- 11：不覆盖"目标必须是普通文件"（传目录时退化为 `RuntimeException: cannot open sqlite db`，不是 `READ_ONLY_STORAGE_NOT_FOUND`）、"只读不跑 Migration"、`mode=ro`、close 后 bytes/size/mtime/sidecar 不变；
+- 02：不覆盖 `commitState` 五集合单次提交、FileStorage staging+`ATOMIC_MOVE`、SQLite 单事务（已由一次性探针 `T2Probe` 验证，见 §7.5.3；尚未固化为入库 case）；
+- 10：第 2 层 `mode=ro` 的机制由一次性探针 `T2bProbe` 验证（见 §7.5.5），case 只断言"拒写 + 文件零变化"这一可观测结果；
+- 11：T2b 已补"目录 / 符号链接（NOFOLLOW）"与"`lab.Main sqlite readonly` 缺库启动"两个子断言；
 - 12：不覆盖非 `SQLException`（如 `RuntimeException`）时是否回滚——`catch` 只认 `SQLException`；
-- 13：不覆盖 T6 另一半——`sqlite readonly` 目标不存在 → `ERR READ_ONLY_STORAGE_NOT_FOUND` 非零且不建目录；
+- 13：覆盖启动参数 fail closed；仍不覆盖 `sqlite readonly` 之外的启动路径（如 `file` 模式建目录失败）；
 - 14：不覆盖负向绑定（application 未到位却把步骤标 COMPLETED、手动跳步）——超时形态由 09 覆盖。
 
 ### 7.4 T2 之后的锚点复核清单（必须逐项打勾）
 
 - [x] R1-REL-01：`RegistryState` 化后，UNCERTAIN 仍走 query；二次 `processOutbox` 仍不调外部端口（T2 实测：仍 PASS）；
 - [x] R1-REL-02：`commitState` 失败时内存仍不发布（T2 实测：仍 PASS）；
-- [ ] **待 T2b** R1-REL-11：只读判定移到新层后，缺库仍 `READ_ONLY_STORAGE_NOT_FOUND` 且零建盘（T2 未迁移只读判定，见 §7.5；锚点 11 本轮仍 PASS）；
+- [x] R1-REL-11：只读判定移到新层后，缺库仍 `READ_ONLY_STORAGE_NOT_FOUND` 且零建盘（**T2b 实测：仍 PASS**，并新增目录/符号链接/启动路径子断言）；
 - [x] R1-REL-12：Migration 事务语义迁移后，版本与 autoCommit 仍正确（T2 未改 `MigrationRunner`，仍 PASS）；
 - [x] R1-REL-13：`StartupOptions` 若拆分重构，Main 仍"先解析、后建库"，退出码 2（T2 未改启动路径，仍 PASS）；
 - [x] R1-REL-14：workflow 走候选快照后，三步正向仍同时 COMPLETED（T2 实测：仍 PASS）。
 
 若某条锚点因重构变成"恒真"（断言被绕过而非被满足），必须在 PR1 内补新断言，不得删除锚点。
 
-### 7.5 T2 落地记录（存储层换代，2026-10-23 实测）
+### 7.5 T2/T2b 落地记录（存储层换代 + 只读加固，2026-10-23 实测）
 
 #### 7.5.1 改动
 
@@ -371,6 +383,9 @@ CASES_TOTAL=30 CASES_PASSED=30 CASES_FAILED=0
 - **6 锚点**：01/02/11/12/13/14 全绿；
 - 进程退出码仍为 `1`（红阶段）。
 
+> 本节是 **T2 提交点**的历史实测。T2b 之后红集合收窄为 7（R1-REL-10 转锚点），
+> 锚点 7 条，见 §7.5.4。
+
 #### 7.5.3 原子化探针（一次性，不入库）
 
 `T2Probe`（14 项）覆盖三类存储的提交语义：
@@ -381,13 +396,52 @@ CASES_TOTAL=30 CASES_PASSED=30 CASES_FAILED=0
 
 实测：`T2_PROBE_CHECKS=14 T2_PROBE_ALL_PASS`。
 
-#### 7.5.4 未完成：五层 readonly（T2b，待裁决）
+#### 7.5.4 五层 readonly（T2b，2026-10-23 晚完成 · 用户裁决 A）
 
-S1 的 T3 要求"五层 readonly"。其中**第 4 层（commit 前抛 `STORAGE_READ_ONLY`）正是 R1-REL-10 的断言本体**：
-落地它，R1-REL-10 必然转绿，与 T2 验收"8 红仍红"直接冲突（这不是提前改业务逻辑，而是本轮范围内的安全加固）。
+**裁决**：第 4 层（commit 前抛 `STORAGE_READ_ONLY`）正是 R1-REL-10 的断言本体，落地即转绿。
+用户裁决采用 A 方案：T2b 单独提交，判据正式由「8 红 + 6 绿」改为「**7 红 + 7 绿**」，
+R1-REL-10 移入 §7.3 锚点表。
 
-按"8 红变绿 = 回退或拆提交"的规则，本轮**暂不实现第 4 层**，只读路径保持 T1 时的行为，
-因此 R1-REL-10 仍为红且失败行不变。待裁决后作为 **T2b** 单独提交：
-第 1 层（目前只有 `Files.exists`，缺"普通文件"判定）+ 第 2 层（`mode=ro` 连接）+ 第 4 层（提交前拒写）+
-第 5 层（close 后 bytes/size/mtime/sidecar 比对）一起落地，届时 R1-REL-10 转绿并移入 §7.3 锚点表。
+**实现**（改动仅在 `SqliteStorage.java`，外加测试与文档）：
+
+| 层 | 要求 | 实现 |
+|---|---|---|
+| 1 | 文件必须存在且是普通文件 | `Files.isRegularFile(dbFile, LinkOption.NOFOLLOW_LINKS)`：目录、符号链接（含悬空链接）一律 `READ_ONLY_STORAGE_NOT_FOUND` |
+| 2 | 连接只读 | `SQLiteConfig.setReadOnly(true)` + `DriverManager.getConnection(url, config.toProperties())`（`SQLITE_OPEN_READONLY`） |
+| 3 | 不跑 Migration | 只读分支不调用 `MigrationRunner.run`；`currentVersion()` 在只读连接上只查 `sqlite_master`，不建表 |
+| 4 | 写 SQL 之前拒写 | `commitState` 与 5 个兼容 `save*` 入口都先 `checkWritable()`，抛 `RegistryException("STORAGE_READ_ONLY")` |
+| 5 | close 后零变化 | 只读打开/拒写/关闭后，库文件与 sidecar 的 bytes+size+mtime 不变（由 R1-REL-10 断言） |
+
+**实测**（同一棵树，干净重编）：
+
+```text
+MAIN_JAVAC_EXIT=0
+TEST_JAVAC_EXIT=0
+  major version: 65
+CHECKS_PASSED=279
+CONCURRENCY_CHECKS_PASSED=8
+RELIABILITY_R1_CASES_FAILED=7
+RELIABILITY_R1_CASES_PASSED=7
+EXIT_CODE=1
+CASES_TOTAL=30 CASES_PASSED=30 CASES_FAILED=0
+```
+
+- **R1-REL-10 转绿**：`savePoints` 与 `commitState`（含候选主键重复的非法状态）都抛 `STORAGE_READ_ONLY`，
+  证明拒绝发生在写 SQL 之前；只读打开/拒写/关闭后库文件与 sidecar 的 bytes+size+mtime 不变；空库只读打开不建表；
+- **R1-REL-11 增强后仍绿**：缺库、目录、符号链接三种目标都报 `READ_ONLY_STORAGE_NOT_FOUND`；
+  `lab.Main sqlite readonly` 缺库时非零退出、首行 `ERR READ_ONLY_STORAGE_NOT_FOUND`、不建 `data/`；
+- **03—09 未被顺带修掉**：T2b 前后对 03—09 的 `FAIL`+`INTENT` 行做逐字节比对，
+  `cmp -s` 退出码 `0`，两侧 sha256 均为
+  `438635d5cb55fefdf118f47f55df812ff0110bf1034045651cb4dc36055138be`；
+- 其余锚点 01/02/12/13/14 全绿。
+
+#### 7.5.5 T2b 探针（一次性，不入库）
+
+`T2bProbe`（5 项）验证第 2 层机制与"拒写后不留锁"：
+
+- 同配置的只读连接执行 `DELETE FROM points` → `SQLITE_READONLY`（`Attempt to write a readonly database`），读仍正常；
+- 只读实例 `commitState` → `RegistryException: STORAGE_READ_ONLY`；
+- 关闭后没有 `-journal` sidecar，重新用读写实例打开仍可正常写入。
+
+实测：`T2B_PROBE_CHECKS=5 T2B_PROBE_ALL_PASS`。
 

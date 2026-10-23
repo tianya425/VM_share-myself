@@ -2,6 +2,7 @@ package lab;
 
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -12,6 +13,8 @@ import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
 
+import org.sqlite.SQLiteConfig;
+
 /**
  * SQLite 存储：整状态单事务提交。
  *
@@ -20,9 +23,14 @@ import java.util.List;
  *
  * <p>实现 {@link AutoCloseable}，拥有连接的生命周期。
  *
- * <p>注意：只读模式的五层加固（文件必须是普通文件、{@code mode=ro} 连接、
- * 提交前抛 {@code STORAGE_READ_ONLY}、close 后字节比对）尚未在本类落地，
- * 见 docs/delivery-verification.md 的 T2 记录（T2b 待办）。
+ * <p>只读模式五层保护：
+ * <ol>
+ *   <li>目标必须已存在，且是普通文件（{@code NOFOLLOW_LINKS}，目录与符号链接一律拒绝）；</li>
+ *   <li>连接用 {@code SQLITE_OPEN_READONLY}（{@link SQLiteConfig#setReadOnly});</li>
+ *   <li>不执行 Migration；</li>
+ *   <li>{@link #commitState} 与兼容 {@code save*} 在写任何 SQL 之前抛 {@code STORAGE_READ_ONLY}；</li>
+ *   <li>只读打开/尝试写/关闭之后，库文件与 sidecar 的 bytes+size+mtime 不变（由调用方断言）。</li>
+ * </ol>
  */
 public class SqliteStorage implements Storage, AutoCloseable {
 
@@ -78,7 +86,9 @@ public class SqliteStorage implements Storage, AutoCloseable {
             ))
     );
 
+    private final Path dbFile;
     private final Connection conn;
+    private final boolean readOnly;
 
     public SqliteStorage(Path dbFile) {
         this(dbFile, false);
@@ -89,20 +99,25 @@ public class SqliteStorage implements Storage, AutoCloseable {
      *
      * @param dbFile   数据库文件路径
      * @param readOnly 只读模式：
-     *                 - true：不创建目录、不创建文件、不执行 Migration；
-     *                         目标不存在时抛 RegistryException。
+     *                 - true：目标必须已存在且是普通文件；不创建目录/文件；不执行 Migration；
+     *                         连接本身以只读方式打开；写入在 SQL 之前被拒绝。
      *                 - false：保持原有行为。
      */
     public SqliteStorage(Path dbFile, boolean readOnly) {
+        this.dbFile = dbFile;
+        this.readOnly = readOnly;
         try {
             if (readOnly) {
-                // 只读：目标必须已经存在
-                if (!Files.exists(dbFile)) {
+                // 第 1 层：目标必须已存在且是普通文件；目录、符号链接（NOFOLLOW）一律按"找不到"处理
+                if (!Files.isRegularFile(dbFile, LinkOption.NOFOLLOW_LINKS)) {
                     throw new RegistryException("READ_ONLY_STORAGE_NOT_FOUND", "");
                 }
-                // 不创建目录、不创建文件、不执行 Migration
+                // 第 2 层：只读连接（SQLITE_OPEN_READONLY）
                 Class.forName("org.sqlite.JDBC");
-                this.conn = DriverManager.getConnection("jdbc:sqlite:" + dbFile.toString());
+                SQLiteConfig config = new SQLiteConfig();
+                config.setReadOnly(true);
+                this.conn = DriverManager.getConnection("jdbc:sqlite:" + dbFile, config.toProperties());
+                // 第 3 层：只读打开不执行 Migration
             } else {
                 // 读写：保持原行为
                 if (dbFile.getParent() != null) {
@@ -124,6 +139,10 @@ public class SqliteStorage implements Storage, AutoCloseable {
     }
 
     public int currentVersion() {
+        if (readOnly) {
+            // 只读连接上不能建表：版本号只查询，schema_version 不存在视为 0
+            return readVersionWithoutDdl();
+        }
         try {
             return MigrationRunner.currentVersion(conn);
         } catch (SQLException e) {
@@ -149,6 +168,7 @@ public class SqliteStorage implements Storage, AutoCloseable {
      */
     @Override
     public synchronized void commitState(RegistryState next) {
+        checkWritable(); // 第 4 层：写任何 SQL 之前就拒绝
         try {
             conn.setAutoCommit(false);
             try (Statement statement = conn.createStatement()) {
@@ -177,7 +197,69 @@ public class SqliteStorage implements Storage, AutoCloseable {
         try {
             conn.close();
         } catch (SQLException e) {
-            throw new RuntimeException("cannot close sqlite db", e);
+            throw new RuntimeException("cannot close sqlite db: " + dbFile, e);
+        }
+    }
+
+    // ---------- 只读保护（第 4 层） ----------
+
+    /**
+     * 兼容委托也必须先拒写，不能在 loadState 的读 SQL 之后才发现是只读。
+     */
+    @Override
+    public void savePoints(List<Point> points) {
+        checkWritable();
+        Storage.super.savePoints(points);
+    }
+
+    @Override
+    public void saveApplications(List<TransferApplication> applications) {
+        checkWritable();
+        Storage.super.saveApplications(applications);
+    }
+
+    @Override
+    public void saveOutbox(List<OutboxEntry> outbox) {
+        checkWritable();
+        Storage.super.saveOutbox(outbox);
+    }
+
+    @Override
+    public void saveInbox(List<InboxEntry> inbox) {
+        checkWritable();
+        Storage.super.saveInbox(inbox);
+    }
+
+    @Override
+    public void saveWorkflows(List<WorkflowInstance> workflows) {
+        checkWritable();
+        Storage.super.saveWorkflows(workflows);
+    }
+
+    private void checkWritable() {
+        if (readOnly) {
+            throw new RegistryException("STORAGE_READ_ONLY", "");
+        }
+    }
+
+    /**
+     * 只读连接上的版本号查询：不建表、不写库。
+     */
+    private int readVersionWithoutDdl() {
+        try (Statement statement = conn.createStatement();
+             ResultSet rs = statement.executeQuery(
+                     "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_version'")) {
+            if (!rs.next()) {
+                return 0;
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("cannot read schema version", e);
+        }
+        try (Statement statement = conn.createStatement();
+             ResultSet rs = statement.executeQuery("SELECT version FROM schema_version")) {
+            return rs.next() ? rs.getInt(1) : 0;
+        } catch (SQLException e) {
+            throw new RuntimeException("cannot read schema version", e);
         }
     }
 

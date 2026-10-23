@@ -460,35 +460,66 @@ public final class ReliabilityCloseoutChecks {
 
     /**
      * SqliteStorage(db,true) 直接写：抛 STORAGE_READ_ONLY，文件/sidecar 字节不变。
+     *
+     * <p>覆盖五层 readonly 中可观测的四层：
+     * ①目标必须是普通文件（另见 R1-REL-11）；②只读连接；③不跑 Migration；
+     * ④{@code commitState} 与兼容 {@code save*} 在写 SQL 之前就抛 {@code STORAGE_READ_ONLY}；
+     * ⑤只读打开/尝试写/关闭之后，库文件与 sidecar 的 bytes+size+mtime 不变。
      */
     private static void caseR1Rel10() throws Exception {
         Path tmp = Files.createTempDirectory("r1-rel10");
         try {
             Path db = tmp.resolve("db.sqlite");
-            SqliteStorage writable = new SqliteStorage(db);
-            writable.savePoints(List.of(new Point("P01", "A")));
-
+            try (SqliteStorage writable = new SqliteStorage(db)) {
+                writable.commitState(new RegistryState(List.of(new Point("P01", "A")),
+                        List.of(), List.of(), List.of(), List.of()));
+            }
             Map<String, String> before = snapshot(tmp);
             require(before.containsKey("db.sqlite"), "基准库文件未生成：" + before.keySet());
+            long beforeSize = Files.size(db);
+            long beforeMtime = Files.getLastModifiedTime(db).toMillis();
 
-            SqliteStorage readOnly = new SqliteStorage(db, true);
-            Throwable thrown = null;
-            try {
-                readOnly.savePoints(List.of(new Point("P01", "A"), new Point("P02", "B")));
-            } catch (RuntimeException e) {
-                thrown = e;
+            try (SqliteStorage readOnly = new SqliteStorage(db, true)) {
+                // ④ 兼容 save*：写 SQL 之前就拒绝
+                requireStorageReadOnly("只读 SqliteStorage.savePoints",
+                        captureFailure(() -> readOnly.savePoints(
+                                List.of(new Point("P01", "A"), new Point("P02", "B")))));
+
+                // ④ commitState：候选状态本身非法（主键重复）时也必须先报 STORAGE_READ_ONLY，
+                //    证明拒绝发生在任何写 SQL 之前（否则会先撞主键错误或数据库只读错误）
+                requireStorageReadOnly("只读 SqliteStorage.commitState",
+                        captureFailure(() -> readOnly.commitState(new RegistryState(
+                                List.of(new Point("P01", "A"), new Point("P01", "B")),
+                                List.of(), List.of(), List.of(), List.of()))));
+
+                require(readOnly.loadPoints().size() == 1,
+                        "只读实例读到 points=" + readOnly.loadPoints().size() + " 期望=1");
+                require(readOnly.currentVersion() == 2,
+                        "只读实例 currentVersion=" + readOnly.currentVersion() + " 期望=2");
             }
-            require(thrown != null,
-                    "只读 SqliteStorage 允许 savePoints 成功（未抛 STORAGE_READ_ONLY）");
-            require(thrown instanceof RegistryException
-                            && "STORAGE_READ_ONLY".equals(((RegistryException) thrown).code()),
-                    "只读写入抛出 " + describe(thrown) + " 期望=RegistryException/STORAGE_READ_ONLY");
 
+            // ⑤ close 之后：bytes+size+mtime+sidecar 全部不变
             Map<String, String> after = snapshot(tmp);
             require(after.equals(before),
-                    "只读写入尝试改变了库文件/sidecar：" + diff(before, after));
-            require(readOnly.loadPoints().size() == 1,
-                    "只读实例读到 points=" + readOnly.loadPoints().size() + " 期望=1");
+                    "只读打开/拒写/关闭之后库文件或 sidecar 变了（bytes/size/mtime）："
+                            + diff(before, after));
+            require(Files.size(db) == beforeSize,
+                    "库文件大小=" + Files.size(db) + " 期望仍为 " + beforeSize);
+            require(Files.getLastModifiedTime(db).toMillis() == beforeMtime,
+                    "库文件 mtime=" + Files.getLastModifiedTime(db).toMillis()
+                            + " 期望仍为 " + beforeMtime);
+
+            // ③ 只读不跑 Migration：空库文件只读打开后仍无表，文件仍为空
+            Path blank = tmp.resolve("blank.sqlite");
+            Files.write(blank, new byte[0]);
+            try (SqliteStorage blankStorage = new SqliteStorage(blank, true)) {
+                require(captureFailure(blankStorage::loadState) != null,
+                        "空库只读打开后 loadState 竟成功：说明只读时执行了 Migration");
+            }
+            require(Files.size(blank) == 0,
+                    "空库只读打开后大小=" + Files.size(blank) + " 期望仍为 0");
+            require(!Files.exists(tmp.resolve("blank.sqlite-journal")),
+                    "只读打开空库后出现了 journal sidecar");
         } finally {
             deleteRecursively(tmp);
         }
@@ -497,31 +528,71 @@ public final class ReliabilityCloseoutChecks {
     // ================= R1-REL-11 =================
 
     /**
-     * 只读 + 库不存在：报 READ_ONLY_STORAGE_NOT_FOUND，不建目录/文件。
+     * 只读 + 库不存在（以及目录/符号链接）：报 READ_ONLY_STORAGE_NOT_FOUND，不建目录/文件。
+     *
+     * <p>含启动路径子断言：`lab.Main sqlite readonly` 在缺库目录下必须非零退出、
+     * 首行 `ERR READ_ONLY_STORAGE_NOT_FOUND`，且不创建 `data/`。
      */
     private static void caseR1Rel11() throws Exception {
         Path tmp = Files.createTempDirectory("r1-rel11");
         try {
+            // ① 缺库
             Path db = tmp.resolve("absent").resolve("db.sqlite");
-
-            Throwable thrown = null;
-            try {
-                new SqliteStorage(db, true);
-            } catch (RuntimeException e) {
-                thrown = e;
-            }
-            require(thrown instanceof RegistryException
-                            && "READ_ONLY_STORAGE_NOT_FOUND".equals(((RegistryException) thrown).code()),
-                    "只读打开不存在的库抛出 " + describe(thrown)
-                            + " 期望=RegistryException/READ_ONLY_STORAGE_NOT_FOUND");
+            requireReadOnlyNotFound("只读打开不存在的库",
+                    captureFailure(() -> new SqliteStorage(db, true)));
             require(!Files.exists(db), "只读启动创建了库文件 " + db);
             require(!Files.exists(db.getParent()), "只读启动创建了目录 " + db.getParent());
 
+            // ② 目标是目录
+            Path asDirectory = tmp.resolve("dir.sqlite");
+            Files.createDirectory(asDirectory);
+            requireReadOnlyNotFound("只读目标是目录",
+                    captureFailure(() -> new SqliteStorage(asDirectory, true)));
+
+            // ③ 目标是符号链接：NOFOLLOW，即使指向真实库也必须拒绝
+            Path real = tmp.resolve("real.sqlite");
+            try (SqliteStorage realStorage = new SqliteStorage(real)) {
+                realStorage.commitState(new RegistryState(List.of(new Point("P01", "A")),
+                        List.of(), List.of(), List.of(), List.of()));
+            }
+            Path link = tmp.resolve("link.sqlite");
+            Files.createSymbolicLink(link, real.getFileName());
+            Map<String, String> beforeLinkAttempt = snapshot(tmp);
+            requireReadOnlyNotFound("只读目标是符号链接",
+                    captureFailure(() -> new SqliteStorage(link, true)));
+            require(snapshot(tmp).equals(beforeLinkAttempt),
+                    "符号链接被拒绝后目录内容发生了变化：" + diff(beforeLinkAttempt, snapshot(tmp)));
+
+            // 临时目录里只允许出现测试自己创建的三项
             List<String> leftovers = new ArrayList<>();
             try (Stream<Path> stream = Files.walk(tmp)) {
                 stream.skip(1).forEach(p -> leftovers.add(tmp.relativize(p).toString()));
             }
-            require(leftovers.isEmpty(), "只读启动在临时目录留下了条目：" + leftovers);
+            List<String> unexpected = leftovers.stream()
+                    .filter(name -> !name.equals("dir.sqlite")
+                            && !name.equals("real.sqlite")
+                            && !name.equals("link.sqlite")
+                            && !name.startsWith("real.sqlite-journal")
+                            && !name.startsWith("real.sqlite-wal")
+                            && !name.startsWith("real.sqlite-shm"))
+                    .toList();
+            require(unexpected.isEmpty(), "只读启动在临时目录留下了意外条目：" + unexpected);
+
+            // ④ 启动路径：sqlite readonly + 缺库 → ERR READ_ONLY_STORAGE_NOT_FOUND，且不建 data/
+            Path workDir = Files.createTempDirectory("r1-rel11-main");
+            try {
+                MainRun run = runMain(javaExecutable(), runtimeClassPath(), workDir,
+                        new String[]{"sqlite", "readonly"}, "exit\n");
+                require(run.exitCode() != 0,
+                        "lab.Main sqlite readonly 缺库时退出码=" + run.exitCode() + " 期望非零");
+                require("ERR READ_ONLY_STORAGE_NOT_FOUND".equals(firstLine(run.output())),
+                        "lab.Main sqlite readonly 缺库首行=" + firstLine(run.output())
+                                + " 期望=ERR READ_ONLY_STORAGE_NOT_FOUND");
+                require(!Files.exists(workDir.resolve("data")),
+                        "只读启动创建了 data/ 目录");
+            } finally {
+                deleteRecursively(workDir);
+            }
         } finally {
             deleteRecursively(tmp);
         }
@@ -595,9 +666,8 @@ public final class ReliabilityCloseoutChecks {
      * ProcessBuilder 跑 main：未知/重复/冲突参数 → 退出码 2、不进命令循环。
      */
     private static void caseR1Rel13() throws Exception {
-        Path javaExe = Path.of(System.getProperty("java.home"), "bin", "java");
-        require(Files.isExecutable(javaExe), "找不到 java 可执行文件：" + javaExe);
-        String classPath = System.getProperty("java.class.path");
+        Path javaExe = javaExecutable();
+        String classPath = runtimeClassPath();
         Path workDir = Path.of(System.getProperty("user.dir"));
 
         runMainExpectStartupError(javaExe, classPath, workDir,
@@ -612,10 +682,28 @@ public final class ReliabilityCloseoutChecks {
 
     private static void runMainExpectStartupError(Path javaExe, String classPath, Path workDir,
                                                   String[] args, String expectedErrorLine) throws Exception {
-        Path stdinFile = Files.createTempFile("r1-rel13", ".in");
+        MainRun run = runMain(javaExe, classPath, workDir, args,
+                "stats\npoint add P01 A\napplication list\nexit\n");
+        String text = run.output();
+        require(run.exitCode() == 2, "参数 " + Arrays.toString(args) + " 退出码=" + run.exitCode()
+                + " 期望=2 输出=" + text.trim());
+        require(expectedErrorLine.equals(firstLine(text)),
+                "参数 " + Arrays.toString(args) + " 首行=" + firstLine(text)
+                        + " 期望=" + expectedErrorLine);
+        require(!text.contains("STATS"), "启动参数错误后仍进入命令循环（出现了 STATS）：" + text.trim());
+        require(!text.contains("BYE"), "启动参数错误后仍执行了 exit（出现了 BYE）：" + text.trim());
+        require(!text.contains("OK POINT_ADDED"),
+                "启动参数错误后仍执行了命令（出现了 OK POINT_ADDED）：" + text.trim());
+    }
+
+    /**
+     * 用 ProcessBuilder 起一个 {@code lab.Main} 子进程，返回退出码与合并后的输出。
+     */
+    private static MainRun runMain(Path javaExe, String classPath, Path workDir,
+                                   String[] args, String stdinContent) throws Exception {
+        Path stdinFile = Files.createTempFile("r1-main", ".in");
         try {
-            String commands = "stats\npoint add P01 A\napplication list\nexit\n";
-            Files.writeString(stdinFile, commands, StandardCharsets.UTF_8);
+            Files.writeString(stdinFile, stdinContent, StandardCharsets.UTF_8);
 
             List<String> command = new ArrayList<>();
             command.add(javaExe.toString());
@@ -644,24 +732,36 @@ public final class ReliabilityCloseoutChecks {
                     output.append(line).append('\n');
                 }
             }
-            String text = output.toString();
             require(finished, "lab.Main 未在 30s 内退出：args=" + Arrays.toString(args)
-                    + " 输出=" + text.trim());
-
-            int exitCode = process.exitValue();
-            require(exitCode == 2, "参数 " + Arrays.toString(args) + " 退出码=" + exitCode
-                    + " 期望=2 输出=" + text.trim());
-            String firstLine = text.isEmpty() ? "" : text.split("\n", -1)[0].trim();
-            require(expectedErrorLine.equals(firstLine),
-                    "参数 " + Arrays.toString(args) + " 首行=" + firstLine
-                            + " 期望=" + expectedErrorLine);
-            require(!text.contains("STATS"), "启动参数错误后仍进入命令循环（出现了 STATS）：" + text.trim());
-            require(!text.contains("BYE"), "启动参数错误后仍执行了 exit（出现了 BYE）：" + text.trim());
-            require(!text.contains("OK POINT_ADDED"),
-                    "启动参数错误后仍执行了命令（出现了 OK POINT_ADDED）：" + text.trim());
+                    + " 输出=" + output.toString().trim());
+            return new MainRun(process.exitValue(), output.toString());
         } finally {
             Files.deleteIfExists(stdinFile);
         }
+    }
+
+    private static Path javaExecutable() {
+        Path javaExe = Path.of(System.getProperty("java.home"), "bin", "java");
+        require(Files.isExecutable(javaExe), "找不到 java 可执行文件：" + javaExe);
+        return javaExe;
+    }
+
+    /**
+     * 子进程可用的绝对 classpath（子进程的 cwd 可能与测试进程不同）。
+     */
+    private static String runtimeClassPath() {
+        List<String> absolute = new ArrayList<>();
+        for (String entry : System.getProperty("java.class.path").split(java.io.File.pathSeparator)) {
+            absolute.add(Path.of(entry).toAbsolutePath().toString());
+        }
+        return String.join(java.io.File.pathSeparator, absolute);
+    }
+
+    private static String firstLine(String text) {
+        return text.isEmpty() ? "" : text.split("\n", -1)[0].trim();
+    }
+
+    private record MainRun(int exitCode, String output) {
     }
 
     // ================= R1-REL-14 =================
@@ -768,6 +868,33 @@ public final class ReliabilityCloseoutChecks {
             return;
         }
         throw new AssertionError(message + "（实际未抛出异常）");
+    }
+
+    /**
+     * 执行动作并返回异常（没有异常时返回 null）。
+     */
+    private static Throwable captureFailure(Action action) {
+        try {
+            action.run();
+            return null;
+        } catch (RuntimeException e) {
+            return e;
+        }
+    }
+
+    private static void requireStorageReadOnly(String label, Throwable failure) {
+        require(failure != null, label + " 未抛异常（期望 STORAGE_READ_ONLY）");
+        require(failure instanceof RegistryException
+                        && "STORAGE_READ_ONLY".equals(((RegistryException) failure).code()),
+                label + " 抛出 " + describe(failure) + " 期望=RegistryException/STORAGE_READ_ONLY");
+    }
+
+    private static void requireReadOnlyNotFound(String label, Throwable failure) {
+        require(failure != null, label + " 未抛异常（期望 READ_ONLY_STORAGE_NOT_FOUND）");
+        require(failure instanceof RegistryException
+                        && "READ_ONLY_STORAGE_NOT_FOUND".equals(((RegistryException) failure).code()),
+                label + " 抛出 " + describe(failure)
+                        + " 期望=RegistryException/READ_ONLY_STORAGE_NOT_FOUND");
     }
 
     // ================= 业务状态读取 =================
@@ -933,7 +1060,8 @@ public final class ReliabilityCloseoutChecks {
                     result.put(name, "NON_REGULAR_FILE");
                     continue;
                 }
-                result.put(name, Files.size(path) + ":" + sha256(path));
+                result.put(name, Files.size(path) + ":" + sha256(path)
+                        + ":" + Files.getLastModifiedTime(path).toMillis());
             }
         }
         return result;
