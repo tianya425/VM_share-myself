@@ -32,19 +32,20 @@ public class Registry {
         this.storage = storage;
         this.rcsPort = rcsPort;
         this.readOnly = readOnly;
-        for (Point p : storage.loadPoints()) {
+        RegistryState loaded = storage.loadState();
+        for (Point p : loaded.points()) {
             points.put(p.pointId(), p);
         }
-        for (TransferApplication a : storage.loadApplications()) {
+        for (TransferApplication a : loaded.applications()) {
             applications.put(a.applicationId(), a);
         }
-        for (OutboxEntry e : storage.loadOutbox()) {
+        for (OutboxEntry e : loaded.outbox()) {
             outbox.put(e.entryId(), e);
         }
-        for (InboxEntry e : storage.loadInbox()) {
+        for (InboxEntry e : loaded.inbox()) {
             inbox.put(e.entryId(), e);
         }
-        for (WorkflowInstance w : storage.loadWorkflows()) {
+        for (WorkflowInstance w : loaded.workflows()) {
             workflows.put(w.applicationId(), w);
         }
     }
@@ -66,7 +67,7 @@ public class Registry {
         // 这样保存失败时内存不会保留幽灵状态。
         Map<String, Point> candidate = new HashMap<>(points);
         candidate.put(pointId, p);
-        storage.savePoints(new ArrayList<>(candidate.values()));
+        storage.commitState(snapshotWithPoints(candidate));
 
         points.put(pointId, p);
         return p;
@@ -116,7 +117,7 @@ public class Registry {
     // 先构造候选视图，保存成功后再发布到内存。
     Map<String, TransferApplication> candidate = new HashMap<>(applications);
     candidate.put(applicationId, app);
-    storage.saveApplications(new ArrayList<>(candidate.values()));
+    storage.commitState(snapshotWithApplications(candidate));
 
     applications.put(applicationId, app);
     return new RegistrationResult(app, false);
@@ -157,7 +158,7 @@ public class Registry {
                 null,
                 0);
         outbox.put(entry.entryId(), entry);
-        persistOutbox();
+        persistAll();
 
         ExternalOrderResult result = rcsPort.createOrder(
                 applicationId, existing.fromPointId(), existing.toPointId());
@@ -177,18 +178,17 @@ public class Registry {
             }
             case REJECTED -> {
                 outbox.put(entry.entryId(), entry.withFailed());
-                persistOutbox();
+                persistAll();
                 throw new RegistryException("RCS_REJECTED", applicationId);
             }
             default -> {
-                persistOutbox();
+                persistAll();
                 throw new RegistryException("RCS_UNEXPECTED", applicationId);
             }
         }
 
         applications.put(applicationId, updated);
-        persistApplications();
-        persistOutbox();
+        persistAll();
         return updated;
     }
 
@@ -216,7 +216,7 @@ public class Registry {
         }
 
         applications.put(applicationId, updated);
-        persistApplications();
+        persistAll();
         return updated;
     }
 
@@ -248,7 +248,7 @@ public class Registry {
 
         TransferApplication updated = existing.withState(target);
         applications.put(applicationId, updated);
-        persistApplications();
+        persistAll();
         return updated;
     }
 
@@ -328,8 +328,7 @@ public class Registry {
             }
         }
 
-        persistOutbox();
-        persistApplications();
+        persistAll();
         return processed;
     }
     // ---------- inbox ----------
@@ -353,7 +352,7 @@ public class Registry {
             InboxEntry rejected = new InboxEntry(entryId, applicationId, eventType,
                     InboxStatus.REJECTED, "UNKNOWN_APPLICATION");
             inbox.put(entryId, rejected);
-            persistInbox();
+            persistAll();
             return rejected;
         }
 
@@ -362,7 +361,7 @@ public class Registry {
             InboxEntry rejected = new InboxEntry(entryId, applicationId, eventType,
                     InboxStatus.REJECTED, "INVALID_STATE_TRANSITION");
             inbox.put(entryId, rejected);
-            persistInbox();
+            persistAll();
             return rejected;
         }
 
@@ -370,8 +369,7 @@ public class Registry {
         InboxEntry processed = new InboxEntry(entryId, applicationId, eventType,
                 InboxStatus.PROCESSED, "");
         inbox.put(entryId, processed);
-        persistApplications();
-        persistInbox();
+        persistAll();
         return processed;
     }
 
@@ -424,7 +422,7 @@ public class Registry {
                 List.copyOf(steps));
 
         workflows.put(applicationId, wf);
-        persistWorkflows();
+        persistAll();
         return wf;
     }
 
@@ -487,7 +485,7 @@ public class Registry {
         }
 
         workflows.put(applicationId, updated);
-        persistWorkflows();
+        persistAll();
         return updated;
     }
 
@@ -567,7 +565,7 @@ public class Registry {
         String storageStatus;
         int pointsCount;
         try {
-            pointsCount = storage.loadPoints().size();
+            pointsCount = storage.loadState().points().size();
             storageStatus = "OK";
         } catch (RuntimeException e) {
             pointsCount = 0;
@@ -640,24 +638,39 @@ public class Registry {
 
     // ---------- persist ----------
 
-    private void persistPoints() {
-        storage.savePoints(new ArrayList<>(points.values()));
+    /**
+     * T2 机械适配：Storage 只接受整状态提交。
+     *
+     * <p>原先按集合的 persist* 一律改为提交当前内存快照：内容相同，提交次数保持不变，
+     * 内存与已提交谁先谁后、失败后内存是否残留，全部沿用改造前的顺序。
+     * 统一成"候选快照 → 单次提交 → 成功后才发布内存"是 T4 的事。
+     */
+    private void persistAll() {
+        storage.commitState(snapshot());
     }
 
-    private void persistApplications() {
-        storage.saveApplications(new ArrayList<>(applications.values()));
+    private RegistryState snapshot() {
+        return new RegistryState(new ArrayList<>(points.values()),
+                new ArrayList<>(applications.values()),
+                new ArrayList<>(outbox.values()),
+                new ArrayList<>(inbox.values()),
+                new ArrayList<>(workflows.values()));
     }
 
-    private void persistOutbox() {
-        storage.saveOutbox(new ArrayList<>(outbox.values()));
+    private RegistryState snapshotWithPoints(Map<String, Point> pointsView) {
+        return new RegistryState(new ArrayList<>(pointsView.values()),
+                new ArrayList<>(applications.values()),
+                new ArrayList<>(outbox.values()),
+                new ArrayList<>(inbox.values()),
+                new ArrayList<>(workflows.values()));
     }
 
-    private void persistInbox() {
-        storage.saveInbox(new ArrayList<>(inbox.values()));
-    }
-
-    private void persistWorkflows() {
-        storage.saveWorkflows(new ArrayList<>(workflows.values()));
+    private RegistryState snapshotWithApplications(Map<String, TransferApplication> applicationsView) {
+        return new RegistryState(new ArrayList<>(points.values()),
+                new ArrayList<>(applicationsView.values()),
+                new ArrayList<>(outbox.values()),
+                new ArrayList<>(inbox.values()),
+                new ArrayList<>(workflows.values()));
     }
 
     // ---------- shared validation ----------

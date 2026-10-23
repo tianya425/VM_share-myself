@@ -327,11 +327,67 @@ T3 三类 Storage 原子化、T4 八个写入口改造、T5 workflow 绑定、T6
 
 ### 7.4 T2 之后的锚点复核清单（必须逐项打勾）
 
-- [ ] R1-REL-01：`RegistryState` 化后，UNCERTAIN 仍走 query；二次 `processOutbox` 仍不调外部端口；
-- [ ] R1-REL-02：`commitState` 失败时内存仍不发布；
-- [ ] R1-REL-11：只读判定移到新层后，缺库仍 `READ_ONLY_STORAGE_NOT_FOUND` 且零建盘；
-- [ ] R1-REL-12：Migration 事务语义迁移后，版本与 autoCommit 仍正确；
-- [ ] R1-REL-13：`StartupOptions` 若拆分重构，Main 仍"先解析、后建库"，退出码 2；
-- [ ] R1-REL-14：workflow 走候选快照后，三步正向仍同时 COMPLETED。
+- [x] R1-REL-01：`RegistryState` 化后，UNCERTAIN 仍走 query；二次 `processOutbox` 仍不调外部端口（T2 实测：仍 PASS）；
+- [x] R1-REL-02：`commitState` 失败时内存仍不发布（T2 实测：仍 PASS）；
+- [ ] **待 T2b** R1-REL-11：只读判定移到新层后，缺库仍 `READ_ONLY_STORAGE_NOT_FOUND` 且零建盘（T2 未迁移只读判定，见 §7.5；锚点 11 本轮仍 PASS）；
+- [x] R1-REL-12：Migration 事务语义迁移后，版本与 autoCommit 仍正确（T2 未改 `MigrationRunner`，仍 PASS）；
+- [x] R1-REL-13：`StartupOptions` 若拆分重构，Main 仍"先解析、后建库"，退出码 2（T2 未改启动路径，仍 PASS）；
+- [x] R1-REL-14：workflow 走候选快照后，三步正向仍同时 COMPLETED（T2 实测：仍 PASS）。
 
 若某条锚点因重构变成"恒真"（断言被绕过而非被满足），必须在 PR1 内补新断言，不得删除锚点。
+
+### 7.5 T2 落地记录（存储层换代，2026-10-23 实测）
+
+#### 7.5.1 改动
+
+| 文件 | 改动 |
+|---|---|
+| `RegistryState.java`（新增） | 五集合整状态快照；构造时 `List.copyOf` + `WorkflowInstance.steps` 深拷贝；提供 `empty()` |
+| `Storage.java` | 合同改为 `loadState()` / `commitState(RegistryState)`；旧 `load*` / `save*` 保留为**兼容委托**，内部一律转成 loadState/commitState |
+| `MemoryStorage.java` | copy-on-write：先深拷贝候选状态，成功才替换已提交引用；`loadState()` 返回深拷贝 |
+| `FileStorage.java` | `*.staging` 暂存文件（写完 flush + fsync）→ `Files.move(ATOMIC_MOVE, REPLACE_EXISTING)`；失败删除暂存、旧快照保留 |
+| `SqliteStorage.java` | 五张表全量重写在**单事务**内完成；实现 `AutoCloseable`；删除按集合的独立写路径 |
+| `Registry.java` | 机械适配：构造改走 `loadState()`；`persist*()` 统一为 `persistAll()`（提交当前内存快照）。执行顺序与"先改内存、后提交"的时机不变；原先相邻的两次**同内容**持久化（如 dispatch 尾部的 applications+outbox）合并为一次提交 |
+
+**没有做**（属 T4/T5，按约束禁止提前）：dispatch 两次提交、processOutbox 的 PENDING/UNCERTAIN 恢复语义、Workflow 步骤完成条件。
+
+> 测试替身同步换代：`ReliabilityCloseoutChecks.FaultStorage` 的注入口从 `save*` 移到
+> `commitState`（`arm` → `armCommit(n)` / `armWhen(predicate)`），**断言、期望值与失败行一条未改**。
+
+#### 7.5.2 验收（实测，与 T1 基线逐条对齐）
+
+```text
+MAIN_JAVAC_EXIT=0
+TEST_JAVAC_EXIT=0
+  major version: 65
+CHECKS_PASSED=279
+CONCURRENCY_CHECKS_PASSED=8
+RELIABILITY_R1_CASES_FAILED=8
+RELIABILITY_R1_CASES_PASSED=6
+CASES_TOTAL=30 CASES_PASSED=30 CASES_FAILED=0
+```
+
+- **8 红**：03/04/05/06/07/08/09/10 全红，失败行与 §7.2 **逐字一致**（未被 T2 顺带修掉）；
+- **6 锚点**：01/02/11/12/13/14 全绿；
+- 进程退出码仍为 `1`（红阶段）。
+
+#### 7.5.3 原子化探针（一次性，不入库）
+
+`T2Probe`（14 项）覆盖三类存储的提交语义：
+
+- MemoryStorage：提交后改源列表不影响已提交；`loadState()` 返回独立快照；再次提交替换旧状态；
+- FileStorage：令第 5 个 `*.staging` 写入失败 → 提交抛异常、**旧快照仍只有 P01**、无 staging 残留；解除阻塞后可再次提交；
+- SqliteStorage：主键冲突触发事务失败 → 五张表**整体回滚**（无部分写入）；`close()` 后只读重开仍可读。
+
+实测：`T2_PROBE_CHECKS=14 T2_PROBE_ALL_PASS`。
+
+#### 7.5.4 未完成：五层 readonly（T2b，待裁决）
+
+S1 的 T3 要求"五层 readonly"。其中**第 4 层（commit 前抛 `STORAGE_READ_ONLY`）正是 R1-REL-10 的断言本体**：
+落地它，R1-REL-10 必然转绿，与 T2 验收"8 红仍红"直接冲突（这不是提前改业务逻辑，而是本轮范围内的安全加固）。
+
+按"8 红变绿 = 回退或拆提交"的规则，本轮**暂不实现第 4 层**，只读路径保持 T1 时的行为，
+因此 R1-REL-10 仍为红且失败行不变。待裁决后作为 **T2b** 单独提交：
+第 1 层（目前只有 `Files.exists`，缺"普通文件"判定）+ 第 2 层（`mode=ro` 连接）+ 第 4 层（提交前拒写）+
+第 5 层（close 后 bytes/size/mtime/sidecar 比对）一起落地，届时 R1-REL-10 转绿并移入 §7.3 锚点表。
+

@@ -17,6 +17,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Predicate;
 import java.util.stream.Stream;
 
 /**
@@ -164,7 +165,7 @@ public final class ReliabilityCloseoutChecks {
         FaultStorage storage = new FaultStorage(committed);
         Registry registry = new Registry(storage, new FakeRcsAdapter(FakeRcsAdapter.Mode.ACCEPT));
 
-        storage.arm("points", 1);
+        storage.armCommit(1);
         expectFailure("registerPoint 在存储失败时必须抛出异常", () -> registry.registerPoint("P01", "A"));
 
         require(registry.listPoints().isEmpty(),
@@ -208,7 +209,7 @@ public final class ReliabilityCloseoutChecks {
         require(appState(registry) == stateBeforeTransition,
                 label + " 前置状态=" + appState(registry) + " 期望=" + stateBeforeTransition);
 
-        storage.arm("applications", 1);
+        storage.armCommit(1);
         expectFailure(label + " 保存失败时必须抛出异常", () -> operation.apply(registry));
 
         require(appState(registry) == stateBeforeTransition,
@@ -231,7 +232,7 @@ public final class ReliabilityCloseoutChecks {
         Registry registry = new Registry(storage, port);
         registerBaseline(registry);
 
-        storage.arm("outbox", 1);
+        storage.armCommit(1);
         expectFailure("dispatch 首次意图保存失败时必须抛出异常",
                 () -> registry.dispatchApplication("APP-001"));
 
@@ -260,7 +261,7 @@ public final class ReliabilityCloseoutChecks {
         registerBaseline(registry);
 
         // 第一次提交（PENDING 意图）成功；第二次提交（申请结果）注入失败
-        storage.arm("applications", 1);
+        storage.armCommit(2);
         expectFailure("dispatch 第二次保存失败必须抛出异常，不得返回成功",
                 () -> registry.dispatchApplication("APP-001"));
 
@@ -311,7 +312,7 @@ public final class ReliabilityCloseoutChecks {
         require(outboxStatus(registry) == OutboxStatus.UNCERTAIN,
                 "dispatch 后 outbox=" + outboxStatus(registry) + " 期望=UNCERTAIN");
 
-        storage.arm("outbox", 1);
+        storage.armCommit(1);
         expectFailure("processOutbox 提交失败时必须抛出异常", registry::processOutbox);
 
         require(port.createCalls == 1,
@@ -339,7 +340,7 @@ public final class ReliabilityCloseoutChecks {
         registerBaseline(registry);
         registry.dispatchApplication("APP-001");
 
-        storage.arm("applications", 1);
+        storage.armCommit(1);
         expectFailure("receiveCallback 提交失败时必须抛出异常",
                 () -> registry.receiveCallback("APP-001", "STARTED"));
 
@@ -365,7 +366,7 @@ public final class ReliabilityCloseoutChecks {
         Registry registryStart = new Registry(storageStart, new FakeRcsAdapter(FakeRcsAdapter.Mode.ACCEPT));
         registerBaseline(registryStart);
 
-        storageStart.arm("workflows", 1);
+        storageStart.armCommit(1);
         expectFailure("startWorkflow 提交失败时必须抛出异常",
                 () -> registryStart.startWorkflow("APP-001"));
 
@@ -385,7 +386,8 @@ public final class ReliabilityCloseoutChecks {
         registerBaseline(registry);
         registry.startWorkflow("APP-001");
 
-        storage.arm("workflows", 1);
+        storage.armWhen(state -> state.workflows().stream()
+                .anyMatch(instance -> instance.currentStepIndex() > 0));
         expectFailure("advanceWorkflow 提交失败时必须抛出异常",
                 () -> registry.advanceWorkflow("APP-001"));
 
@@ -855,93 +857,65 @@ public final class ReliabilityCloseoutChecks {
     }
 
     /**
-     * 故障注入存储：委托给真实存储，按"表 + 第几次保存"注入一次失败。
+     * 故障注入存储：委托给真实存储，在"第 N 次提交"或"满足条件的提交"上注入一次失败。
+     *
+     * <p>T2 起 Storage 只接受整状态提交，故障注入点随之从 save* 移到 commitState；
+     * 各 case 的断言与期望值保持不变。
      */
     private static final class FaultStorage implements Storage {
 
         private final Storage delegate;
-        private String armedTable;
-        private int armedOccurrence = 1;
-        private int armedSeen;
+        private Predicate<RegistryState> predicate;
+        private int armAtCommit = -1;
+        private int commitsSinceArm;
 
         FaultStorage(Storage delegate) {
             this.delegate = delegate;
         }
 
-        void arm(String table, int occurrence) {
-            this.armedTable = table;
-            this.armedOccurrence = Math.max(1, occurrence);
-            this.armedSeen = 0;
+        /**
+         * 从此刻起，第 nth 次 commitState 抛一次失败。
+         */
+        void armCommit(int nth) {
+            this.predicate = null;
+            this.armAtCommit = Math.max(1, nth);
+            this.commitsSinceArm = 0;
+        }
+
+        /**
+         * 从此刻起，第一个满足条件的候选状态提交失败。
+         */
+        void armWhen(Predicate<RegistryState> condition) {
+            this.predicate = condition;
+            this.armAtCommit = -1;
+            this.commitsSinceArm = 0;
         }
 
         void clearFaults() {
-            this.armedTable = null;
+            this.predicate = null;
+            this.armAtCommit = -1;
         }
 
-        private void guard(String table) {
-            if (armedTable == null || !armedTable.equals(table)) {
-                return;
+        @Override
+        public RegistryState loadState() {
+            return delegate.loadState();
+        }
+
+        @Override
+        public void commitState(RegistryState next) {
+            if (predicate != null) {
+                if (predicate.test(next)) {
+                    predicate = null;
+                    throw new IllegalStateException("INJECTED_FAILURE commitState");
+                }
+            } else if (armAtCommit > 0) {
+                commitsSinceArm++;
+                if (commitsSinceArm >= armAtCommit) {
+                    armAtCommit = -1;
+                    throw new IllegalStateException("INJECTED_FAILURE commitState");
+                }
             }
-            armedSeen++;
-            if (armedSeen >= armedOccurrence) {
-                armedTable = null;
-                throw new IllegalStateException("INJECTED_FAILURE save" + table);
-            }
-        }
-
-        @Override
-        public List<Point> loadPoints() {
-            return delegate.loadPoints();
-        }
-
-        @Override
-        public List<TransferApplication> loadApplications() {
-            return delegate.loadApplications();
-        }
-
-        @Override
-        public List<OutboxEntry> loadOutbox() {
-            return delegate.loadOutbox();
-        }
-
-        @Override
-        public List<InboxEntry> loadInbox() {
-            return delegate.loadInbox();
-        }
-
-        @Override
-        public List<WorkflowInstance> loadWorkflows() {
-            return delegate.loadWorkflows();
-        }
-
-        @Override
-        public void savePoints(List<Point> points) {
-            guard("points");
-            delegate.savePoints(points);
-        }
-
-        @Override
-        public void saveApplications(List<TransferApplication> applications) {
-            guard("applications");
-            delegate.saveApplications(applications);
-        }
-
-        @Override
-        public void saveOutbox(List<OutboxEntry> outbox) {
-            guard("outbox");
-            delegate.saveOutbox(outbox);
-        }
-
-        @Override
-        public void saveInbox(List<InboxEntry> inbox) {
-            guard("inbox");
-            delegate.saveInbox(inbox);
-        }
-
-        @Override
-        public void saveWorkflows(List<WorkflowInstance> workflows) {
-            guard("workflows");
-            delegate.saveWorkflows(workflows);
+            delegate.commitState(next);
         }
     }
 

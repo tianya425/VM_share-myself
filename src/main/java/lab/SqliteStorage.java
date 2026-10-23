@@ -12,7 +12,19 @@ import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
 
-public class SqliteStorage implements Storage {
+/**
+ * SQLite 存储：整状态单事务提交。
+ *
+ * <p>五张表（points / applications / outbox / inbox / workflows）的
+ * 全量重写在同一个事务里完成：任一步失败整体回滚，不会留下"只更新了一半"的库。
+ *
+ * <p>实现 {@link AutoCloseable}，拥有连接的生命周期。
+ *
+ * <p>注意：只读模式的五层加固（文件必须是普通文件、{@code mode=ro} 连接、
+ * 提交前抛 {@code STORAGE_READ_ONLY}、close 后字节比对）尚未在本类落地，
+ * 见 docs/delivery-verification.md 的 T2 记录（T2b 待办）。
+ */
+public class SqliteStorage implements Storage, AutoCloseable {
 
     private static final List<Migration> MIGRATIONS = List.of(
             new Migration(1, "create core tables", List.of(
@@ -119,11 +131,62 @@ public class SqliteStorage implements Storage {
         }
     }
 
+    // ---------- Storage ----------
+
     @Override
-    public List<Point> loadPoints() {
+    public synchronized RegistryState loadState() {
+        return new RegistryState(
+                readPoints(),
+                readApplications(),
+                readOutbox(),
+                readInbox(),
+                readWorkflows());
+    }
+
+    /**
+     * 单事务提交整份状态：五张表先全删再全插，一起 commit。
+     * 失败则 rollback，已提交状态不变。
+     */
+    @Override
+    public synchronized void commitState(RegistryState next) {
+        try {
+            conn.setAutoCommit(false);
+            try (Statement statement = conn.createStatement()) {
+                statement.execute("DELETE FROM points");
+                statement.execute("DELETE FROM applications");
+                statement.execute("DELETE FROM outbox");
+                statement.execute("DELETE FROM inbox");
+                statement.execute("DELETE FROM workflows");
+            }
+            insertPoints(next.points());
+            insertApplications(next.applications());
+            insertOutbox(next.outbox());
+            insertInbox(next.inbox());
+            insertWorkflows(next.workflows());
+            conn.commit();
+        } catch (SQLException e) {
+            rollbackQuietly();
+            throw new RuntimeException("cannot commit state", e);
+        } finally {
+            setAutoCommitQuietly(true);
+        }
+    }
+
+    @Override
+    public synchronized void close() {
+        try {
+            conn.close();
+        } catch (SQLException e) {
+            throw new RuntimeException("cannot close sqlite db", e);
+        }
+    }
+
+    // ---------- 读取 ----------
+
+    private List<Point> readPoints() {
         List<Point> result = new ArrayList<>();
-        try (Statement s = conn.createStatement();
-             ResultSet rs = s.executeQuery("SELECT point_id, name FROM points")) {
+        try (Statement statement = conn.createStatement();
+             ResultSet rs = statement.executeQuery("SELECT point_id, name FROM points")) {
             while (rs.next()) {
                 result.add(new Point(rs.getString("point_id"), rs.getString("name")));
             }
@@ -133,11 +196,10 @@ public class SqliteStorage implements Storage {
         return result;
     }
 
-    @Override
-    public List<TransferApplication> loadApplications() {
+    private List<TransferApplication> readApplications() {
         List<TransferApplication> result = new ArrayList<>();
-        try (Statement s = conn.createStatement();
-             ResultSet rs = s.executeQuery(
+        try (Statement statement = conn.createStatement();
+             ResultSet rs = statement.executeQuery(
                      "SELECT application_id, from_point_id, to_point_id, state, external_order_id FROM applications")) {
             while (rs.next()) {
                 ApplicationState state;
@@ -159,11 +221,10 @@ public class SqliteStorage implements Storage {
         return result;
     }
 
-    @Override
-    public List<OutboxEntry> loadOutbox() {
+    private List<OutboxEntry> readOutbox() {
         List<OutboxEntry> result = new ArrayList<>();
-        try (Statement s = conn.createStatement();
-             ResultSet rs = s.executeQuery(
+        try (Statement statement = conn.createStatement();
+             ResultSet rs = statement.executeQuery(
                      "SELECT entry_id, application_id, from_point_id, to_point_id, status, external_order_id, attempts FROM outbox")) {
             while (rs.next()) {
                 OutboxStatus status;
@@ -187,11 +248,10 @@ public class SqliteStorage implements Storage {
         return result;
     }
 
-    @Override
-    public List<InboxEntry> loadInbox() {
+    private List<InboxEntry> readInbox() {
         List<InboxEntry> result = new ArrayList<>();
-        try (Statement s = conn.createStatement();
-             ResultSet rs = s.executeQuery(
+        try (Statement statement = conn.createStatement();
+             ResultSet rs = statement.executeQuery(
                      "SELECT entry_id, application_id, event_type, status, reason FROM inbox")) {
             while (rs.next()) {
                 InboxStatus status;
@@ -213,11 +273,10 @@ public class SqliteStorage implements Storage {
         return result;
     }
 
-    @Override
-    public List<WorkflowInstance> loadWorkflows() {
+    private List<WorkflowInstance> readWorkflows() {
         List<WorkflowInstance> result = new ArrayList<>();
-        try (Statement s = conn.createStatement();
-             ResultSet rs = s.executeQuery(
+        try (Statement statement = conn.createStatement();
+             ResultSet rs = statement.executeQuery(
                      "SELECT instance_id, application_id, state, current_step_index, steps FROM workflows")) {
             while (rs.next()) {
                 WorkflowState state;
@@ -259,157 +318,97 @@ public class SqliteStorage implements Storage {
         return result;
     }
 
-    @Override
-    public void savePoints(List<Point> points) {
-        try {
-            conn.setAutoCommit(false);
-            try (Statement s = conn.createStatement()) {
-                s.execute("DELETE FROM points");
+    // ---------- 写入（只在 commitState 的事务里调用） ----------
+
+    private void insertPoints(List<Point> points) throws SQLException {
+        try (PreparedStatement statement = conn.prepareStatement(
+                "INSERT INTO points (point_id, name) VALUES (?, ?)")) {
+            for (Point p : points) {
+                statement.setString(1, p.pointId());
+                statement.setString(2, p.name());
+                statement.addBatch();
             }
-            try (PreparedStatement ps = conn.prepareStatement(
-                    "INSERT INTO points (point_id, name) VALUES (?, ?)")) {
-                for (Point p : points) {
-                    ps.setString(1, p.pointId());
-                    ps.setString(2, p.name());
-                    ps.addBatch();
-                }
-                ps.executeBatch();
-            }
-            conn.commit();
-        } catch (SQLException e) {
-            rollbackQuietly();
-            throw new RuntimeException("cannot save points", e);
-        } finally {
-            setAutoCommitQuietly(true);
+            statement.executeBatch();
         }
     }
 
-    @Override
-    public void saveApplications(List<TransferApplication> applications) {
-        try {
-            conn.setAutoCommit(false);
-            try (Statement s = conn.createStatement()) {
-                s.execute("DELETE FROM applications");
+    private void insertApplications(List<TransferApplication> applications) throws SQLException {
+        try (PreparedStatement statement = conn.prepareStatement(
+                "INSERT INTO applications (application_id, from_point_id, to_point_id, state, external_order_id) VALUES (?, ?, ?, ?, ?)")) {
+            for (TransferApplication a : applications) {
+                statement.setString(1, a.applicationId());
+                statement.setString(2, a.fromPointId());
+                statement.setString(3, a.toPointId());
+                statement.setString(4, a.state().name());
+                statement.setString(5, a.externalOrderId());
+                statement.addBatch();
             }
-            try (PreparedStatement ps = conn.prepareStatement(
-                    "INSERT INTO applications (application_id, from_point_id, to_point_id, state, external_order_id) VALUES (?, ?, ?, ?, ?)")) {
-                for (TransferApplication a : applications) {
-                    ps.setString(1, a.applicationId());
-                    ps.setString(2, a.fromPointId());
-                    ps.setString(3, a.toPointId());
-                    ps.setString(4, a.state().name());
-                    ps.setString(5, a.externalOrderId());
-                    ps.addBatch();
-                }
-                ps.executeBatch();
-            }
-            conn.commit();
-        } catch (SQLException e) {
-            rollbackQuietly();
-            throw new RuntimeException("cannot save applications", e);
-        } finally {
-            setAutoCommitQuietly(true);
+            statement.executeBatch();
         }
     }
 
-    @Override
-    public void saveOutbox(List<OutboxEntry> outbox) {
-        try {
-            conn.setAutoCommit(false);
-            try (Statement s = conn.createStatement()) {
-                s.execute("DELETE FROM outbox");
+    private void insertOutbox(List<OutboxEntry> outbox) throws SQLException {
+        try (PreparedStatement statement = conn.prepareStatement(
+                "INSERT INTO outbox (entry_id, application_id, from_point_id, to_point_id, status, external_order_id, attempts) VALUES (?, ?, ?, ?, ?, ?, ?)")) {
+            for (OutboxEntry e : outbox) {
+                statement.setString(1, e.entryId());
+                statement.setString(2, e.applicationId());
+                statement.setString(3, e.fromPointId());
+                statement.setString(4, e.toPointId());
+                statement.setString(5, e.status().name());
+                statement.setString(6, e.externalOrderId());
+                statement.setInt(7, e.attempts());
+                statement.addBatch();
             }
-            try (PreparedStatement ps = conn.prepareStatement(
-                    "INSERT INTO outbox (entry_id, application_id, from_point_id, to_point_id, status, external_order_id, attempts) VALUES (?, ?, ?, ?, ?, ?, ?)")) {
-                for (OutboxEntry e : outbox) {
-                    ps.setString(1, e.entryId());
-                    ps.setString(2, e.applicationId());
-                    ps.setString(3, e.fromPointId());
-                    ps.setString(4, e.toPointId());
-                    ps.setString(5, e.status().name());
-                    ps.setString(6, e.externalOrderId());
-                    ps.setInt(7, e.attempts());
-                    ps.addBatch();
-                }
-                ps.executeBatch();
-            }
-            conn.commit();
-        } catch (SQLException e) {
-            rollbackQuietly();
-            throw new RuntimeException("cannot save outbox", e);
-        } finally {
-            setAutoCommitQuietly(true);
+            statement.executeBatch();
         }
     }
 
-    @Override
-    public void saveInbox(List<InboxEntry> inbox) {
-        try {
-            conn.setAutoCommit(false);
-            try (Statement s = conn.createStatement()) {
-                s.execute("DELETE FROM inbox");
+    private void insertInbox(List<InboxEntry> inbox) throws SQLException {
+        try (PreparedStatement statement = conn.prepareStatement(
+                "INSERT INTO inbox (entry_id, application_id, event_type, status, reason) VALUES (?, ?, ?, ?, ?)")) {
+            for (InboxEntry e : inbox) {
+                statement.setString(1, e.entryId());
+                statement.setString(2, e.applicationId());
+                statement.setString(3, e.eventType());
+                statement.setString(4, e.status().name());
+                statement.setString(5, e.reason());
+                statement.addBatch();
             }
-            try (PreparedStatement ps = conn.prepareStatement(
-                    "INSERT INTO inbox (entry_id, application_id, event_type, status, reason) VALUES (?, ?, ?, ?, ?)")) {
-                for (InboxEntry e : inbox) {
-                    ps.setString(1, e.entryId());
-                    ps.setString(2, e.applicationId());
-                    ps.setString(3, e.eventType());
-                    ps.setString(4, e.status().name());
-                    ps.setString(5, e.reason());
-                    ps.addBatch();
-                }
-                ps.executeBatch();
-            }
-            conn.commit();
-        } catch (SQLException e) {
-            rollbackQuietly();
-            throw new RuntimeException("cannot save inbox", e);
-        } finally {
-            setAutoCommitQuietly(true);
+            statement.executeBatch();
         }
     }
 
-    @Override
-    public void saveWorkflows(List<WorkflowInstance> workflows) {
-        try {
-            conn.setAutoCommit(false);
-            try (Statement s = conn.createStatement()) {
-                s.execute("DELETE FROM workflows");
-            }
-            try (PreparedStatement ps = conn.prepareStatement(
-                    "INSERT INTO workflows (instance_id, application_id, state, current_step_index, steps) VALUES (?, ?, ?, ?, ?)")) {
-                for (WorkflowInstance wf : workflows) {
-                    StringBuilder steps = new StringBuilder();
-                    for (int i = 0; i < wf.steps().size(); i++) {
-                        if (i > 0) {
-                            steps.append(",");
-                        }
-                        WorkflowStep step = wf.steps().get(i);
-                        steps.append(step.name()).append(":").append(step.state().name());
+    private void insertWorkflows(List<WorkflowInstance> workflows) throws SQLException {
+        try (PreparedStatement statement = conn.prepareStatement(
+                "INSERT INTO workflows (instance_id, application_id, state, current_step_index, steps) VALUES (?, ?, ?, ?, ?)")) {
+            for (WorkflowInstance wf : workflows) {
+                StringBuilder steps = new StringBuilder();
+                for (int i = 0; i < wf.steps().size(); i++) {
+                    if (i > 0) {
+                        steps.append(',');
                     }
-                    ps.setString(1, wf.instanceId());
-                    ps.setString(2, wf.applicationId());
-                    ps.setString(3, wf.state().name());
-                    ps.setInt(4, wf.currentStepIndex());
-                    ps.setString(5, steps.toString());
-                    ps.addBatch();
+                    WorkflowStep step = wf.steps().get(i);
+                    steps.append(step.name()).append(':').append(step.state().name());
                 }
-                ps.executeBatch();
+                statement.setString(1, wf.instanceId());
+                statement.setString(2, wf.applicationId());
+                statement.setString(3, wf.state().name());
+                statement.setInt(4, wf.currentStepIndex());
+                statement.setString(5, steps.toString());
+                statement.addBatch();
             }
-            conn.commit();
-        } catch (SQLException e) {
-            rollbackQuietly();
-            throw new RuntimeException("cannot save workflows", e);
-        } finally {
-            setAutoCommitQuietly(true);
+            statement.executeBatch();
         }
     }
+
+    // ---------- 事务辅助 ----------
 
     private void rollbackQuietly() {
         try {
             conn.rollback();
         } catch (SQLException ignored) {
+            // 回滚失败只能保留原始异常；连接随后会被 setAutoCommit 复位
         }
     }
 
@@ -417,6 +416,7 @@ public class SqliteStorage implements Storage {
         try {
             conn.setAutoCommit(value);
         } catch (SQLException ignored) {
+            // 连接已损坏时不再覆盖原始异常
         }
     }
 }
