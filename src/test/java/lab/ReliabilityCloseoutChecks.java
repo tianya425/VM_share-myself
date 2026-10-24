@@ -52,7 +52,8 @@ public final class ReliabilityCloseoutChecks {
             "dispatch 第二次保存失败：不得报成功，内存必须回到第一次提交快照（CREATED + PENDING），"
                     + "恢复时先 query 且不再 create";
     private static final String INTENT_06 =
-            "processOutbox 提交失败：不得盲目重发（create 不增加）、申请与 outbox 必须回到已提交状态";
+            "processOutbox 提交失败：不得盲目重发（create 不增加）、申请与 outbox 必须回到已提交状态；"
+                    + "子断言 query ACCEPTED 时 application=DISPATCHED 与 outbox=SENT 同一次提交、失败两侧一起回退";
     private static final String INTENT_07 =
             "receiveCallback 提交失败：application 与 inbox 在内存和已提交存储中都必须保持不变";
     private static final String INTENT_08 =
@@ -298,6 +299,10 @@ public final class ReliabilityCloseoutChecks {
 
     /**
      * query/processOutbox 提交失败：create 不增加、状态回到已提交。
+     *
+     * <p>含子断言 query_accepted_updates_application_and_outbox：
+     * query ACCEPTED 时 application=DISPATCHED 与 outbox=SENT 必须落在同一次提交；
+     * 提交失败时两侧一起回退。
      */
     private static void caseR1Rel06() {
         MemoryStorage committed = new MemoryStorage();
@@ -326,6 +331,54 @@ public final class ReliabilityCloseoutChecks {
                 "已提交申请状态=" + committedApp(committed, "APP-001").state() + " 期望=UNKNOWN");
         require(committedOutbox(committed, "OBX-APP-001").status() == OutboxStatus.UNCERTAIN,
                 "已提交 outbox=" + committedOutbox(committed, "OBX-APP-001").status() + " 期望=UNCERTAIN");
+
+        // 子断言 query_accepted_updates_application_and_outbox
+        MemoryStorage queryCommitted = new MemoryStorage();
+        FaultStorage queryStorage = new FaultStorage(queryCommitted);
+        CountingPort queryPort = new CountingPort(FakeRcsAdapter.Mode.TIMEOUT_BUT_CREATED);
+        Registry queryRegistry = new Registry(queryStorage, queryPort);
+        registerBaseline(queryRegistry);
+        queryRegistry.dispatchApplication("APP-001");
+
+        // 只允许一次提交：若 query 被拆成两次提交，第 2 次会被注入失败
+        queryStorage.armCommit(2);
+        TransferApplication queried = queryRegistry.queryApplication("APP-001");
+        require(queried.state() == ApplicationState.DISPATCHED,
+                "query ACCEPTED 后申请状态=" + queried.state()
+                        + " 期望=DISPATCHED（query 不得被拆成两次提交）");
+        require(outboxStatus(queryRegistry) == OutboxStatus.SENT,
+                "query ACCEPTED 后 outbox=" + outboxStatus(queryRegistry) + " 期望=SENT");
+        require("EXT-APP-001".equals(onlyOutbox(queryRegistry).externalOrderId()),
+                "query ACCEPTED 后 outbox 外单号=" + onlyOutbox(queryRegistry).externalOrderId()
+                        + " 期望=EXT-APP-001");
+        require(committedApp(queryCommitted, "APP-001").state() == ApplicationState.DISPATCHED,
+                "query 后已提交申请状态=" + committedApp(queryCommitted, "APP-001").state()
+                        + " 期望=DISPATCHED");
+        require(committedOutbox(queryCommitted, "OBX-APP-001").status() == OutboxStatus.SENT,
+                "query 后已提交 outbox=" + committedOutbox(queryCommitted, "OBX-APP-001").status()
+                        + " 期望=SENT");
+
+        // 提交失败时两侧一起回退
+        MemoryStorage failCommitted = new MemoryStorage();
+        FaultStorage failStorage = new FaultStorage(failCommitted);
+        CountingPort failPort = new CountingPort(FakeRcsAdapter.Mode.TIMEOUT_BUT_CREATED);
+        Registry failRegistry = new Registry(failStorage, failPort);
+        registerBaseline(failRegistry);
+        failRegistry.dispatchApplication("APP-001");
+
+        failStorage.armCommit(1);
+        expectFailure("query 提交失败时必须抛出异常", () -> failRegistry.queryApplication("APP-001"));
+
+        require(appState(failRegistry) == ApplicationState.UNKNOWN,
+                "query 提交失败后内存申请状态=" + appState(failRegistry) + " 期望回到已提交=UNKNOWN");
+        require(outboxStatus(failRegistry) == OutboxStatus.UNCERTAIN,
+                "query 提交失败后内存 outbox=" + outboxStatus(failRegistry) + " 期望回到已提交=UNCERTAIN");
+        require(committedApp(failCommitted, "APP-001").state() == ApplicationState.UNKNOWN,
+                "query 提交失败后已提交申请状态=" + committedApp(failCommitted, "APP-001").state()
+                        + " 期望=UNKNOWN");
+        require(committedOutbox(failCommitted, "OBX-APP-001").status() == OutboxStatus.UNCERTAIN,
+                "query 提交失败后已提交 outbox=" + committedOutbox(failCommitted, "OBX-APP-001").status()
+                        + " 期望=UNCERTAIN");
     }
 
     // ================= R1-REL-07 =================

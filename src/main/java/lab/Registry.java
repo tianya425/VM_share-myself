@@ -395,25 +395,29 @@ public class Registry {
 
         String stepName = WORKFLOW_STEP_NAMES.get(index);
 
-        // 整步只提交一次：业务动作（含外部端口调用）与 Workflow 推进写在同一份候选快照上
+        // 本步必须达成的目标状态（T5：只有真的达成才写 COMPLETED）
+        ApplicationState target = switch (stepName) {
+            case "DISPATCH" -> ApplicationState.DISPATCHED;
+            case "EXECUTE" -> ApplicationState.EXECUTING;
+            case "COMPLETE" -> ApplicationState.COMPLETED;
+            default -> throw new RegistryException("WORKFLOW_UNKNOWN_STEP", stepName);
+        };
+
+        // 业务动作与 Workflow 推进写在同一份候选快照上，最后只提交一次
         CandidateState candidate = candidate();
         TransferApplication app = lookupApplication(candidate.applications, applicationId);
 
-        // 如果申请状态已经到位（例如用户之前手动调用过 application dispatch），就不重复推进，
-        // 直接标记本步完成；状态不符合时保持不推进（与原行为一致）。
+        // 申请状态已经到位（例如用户之前手动推进过）就不重复调用业务方法
+        boolean rejected = false;
         switch (stepName) {
             case "DISPATCH" -> {
                 if (app.state() == ApplicationState.CREATED) {
                     OutboxEntry intent = pendingEntry(app);
                     candidate.outbox.add(intent);
                     ExternalOrderResult result = applyCreateResult(candidate, intent);
-                    if (result.outcome() == ExternalOrderResult.Outcome.REJECTED) {
-                        // 只落失败意图，不推进步骤
-                        storage.commitState(candidate.toState());
-                        publish(candidate);
-                        throw new RegistryException("RCS_REJECTED", applicationId);
-                    }
-                    if (result.outcome() != ExternalOrderResult.Outcome.ACCEPTED
+                    rejected = result.outcome() == ExternalOrderResult.Outcome.REJECTED;
+                    if (!rejected
+                            && result.outcome() != ExternalOrderResult.Outcome.ACCEPTED
                             && result.outcome() != ExternalOrderResult.Outcome.TIMEOUT) {
                         throw new RegistryException("RCS_UNEXPECTED", applicationId);
                     }
@@ -434,17 +438,30 @@ public class Registry {
             default -> throw new RegistryException("WORKFLOW_UNKNOWN_STEP", stepName);
         }
 
-        // T4 保持现状：业务动作未抛异常就推进步骤。
-        // 步骤完成条件绑定（超时/状态不符时保持 PENDING）属 T5，因此 R1-REL-09 仍为红。
-        WorkflowInstance updated = wf.withStep(index, WorkflowStepState.COMPLETED)
-                .withCurrentStepIndex(index + 1);
-        if (index + 1 >= WORKFLOW_STEP_NAMES.size()) {
-            updated = updated.withState(WorkflowState.COMPLETED);
+        // T5：只有目标阶段真的达成（达到或越过），才写 COMPLETED 并推进 index。
+        // 超时（UNKNOWN）、REJECTED、CANCELLED、状态不符时：步骤保持 PENDING、currentStepIndex 不动、
+        // workflow 保持 RUNNING；但本步产生的业务结果（如 UNKNOWN/UNCERTAIN、FAILED）照常落盘。
+        //
+        // 说明：手动推进会让申请状态跑到本步目标之前（例如先 dispatch + callback STARTED，
+        // 再 workflow advance 的 DISPATCH 步），此时该阶段已达成，步骤直接追平为 COMPLETED；
+        // 这正是 30 个旧 case 中 sqlite-basic 的既有语义（否则 RUNNING 1/3 会退成 0/3）。
+        TransferApplication afterAction = lookupApplication(candidate.applications, applicationId);
+        if (afterAction != null && hasReached(afterAction.state(), target)) {
+            WorkflowInstance updated = wf.withStep(index, WorkflowStepState.COMPLETED)
+                    .withCurrentStepIndex(index + 1);
+            if (index + 1 >= WORKFLOW_STEP_NAMES.size()) {
+                updated = updated.withState(WorkflowState.COMPLETED);
+            }
+            storeWorkflow(candidate.workflows, updated);
         }
 
-        storeWorkflow(candidate.workflows, updated);
+        // application 的业务结果与 workflow 同一次提交
         storage.commitState(candidate.toState());
         publish(candidate);
+
+        if (rejected) {
+            throw new RegistryException("RCS_REJECTED", applicationId);
+        }
         return workflows.get(applicationId);
     }
 
@@ -712,8 +729,29 @@ public class Registry {
         list.add(updated);
     }
 
-    private static OutboxEntry pendingEntry(TransferApplication application) {
-        return new OutboxEntry(
+    /**
+     * 应用状态是否已经达到或越过某个阶段（T5 的步骤完成条件）。
+     *
+     * <p>正常主线：CREATED(0) → DISPATCHED(1) → EXECUTING(2) → COMPLETED(3)。
+     * 达到目标阶段即算达成；手动推进造成的"跑得更远"也算（步骤直接追平）。
+     * UNKNOWN / CANCELLED 不在推进主线上，一律不算达成。
+     */
+    private static boolean hasReached(ApplicationState current, ApplicationState target) {
+        int targetRank = lifecycleRank(target);
+        return targetRank > 0 && lifecycleRank(current) >= targetRank;
+    }
+
+    private static int lifecycleRank(ApplicationState state) {
+        return switch (state) {
+            case CREATED -> 0;
+            case DISPATCHED -> 1;
+            case EXECUTING -> 2;
+            case COMPLETED -> 3;
+            case UNKNOWN, CANCELLED -> -1;
+        };
+    }
+
+    private static OutboxEntry pendingEntry(TransferApplication application) {        return new OutboxEntry(
                 "OBX-" + application.applicationId(),
                 application.applicationId(),
                 application.fromPointId(),

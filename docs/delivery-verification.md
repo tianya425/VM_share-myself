@@ -296,19 +296,20 @@ java -cp "out/main:out/test:lib/sqlite-jdbc-3.46.1.3.jar" lab.ReliabilityCloseou
 > **数字巧合警告**：本节 `RELIABILITY_R1_CASES_PASSED=6` 与第 3 节基线记录里的
 > `RELIABILITY_CASES_PASSED=6` 含义不同——旧类是"6 个 case 全过（6/6）"，
 > 新类是"14 个 case 中 6 个过（6/14），另 8 个红"。复核时不要按数字误判。
-> （T2b 落地后本类为 **7/7**，见 §7.5.4；T4 落地后为 **13/1**，见 §7.5.6。）
+> （T2b 落地后本类为 **7/7**，见 §7.5.4；T4 落地后为 **13/1**，见 §7.5.6；
+> T5 落地后为 **14/0**，见 §7.5.7。）
 
-### 7.2 1 条 FAIL（红）——T5 的整改对账依据
+**2026-10-24 T5 落地（用户指令）**：Workflow 步骤完成条件绑定应用状态（R1-REL-09 转绿），
+并给 R1-REL-06 补 query 子断言。红集合清零：
 
-| case | 真实失败行（逐字） | 断言意图 | 对应整改项 |
-|---|---|---|---|
-| R1-REL-09 | `超时后 stepIndex=1 期望=0 即 RUNNING 0/3（advanceWorkflow 未抛异常）` | 超时（UNKNOWN/UNCERTAIN）后 workflow 保持 RUNNING 0/3、step0 PENDING | REP-08（B-08/B-09/B-10），T5 |
+> **0 红 + 14 绿**：`RELIABILITY_R1_CASES_PASSED=14`，进程退出码 `0`。
 
-> 失败行与断言意图成对出现在输出里（`R1-REL-XX FAIL: …` + `R1-REL-XX INTENT: …`）。
-> **R1-REL-03—08** 已于 **T4** 转绿并移入 §7.3（见 §7.5.6）；
-> **R1-REL-10** 已于 **T2b** 转绿并移入 §7.3（见 §7.5.4）。
+### 7.2 0 条 FAIL（红）——T5 后清空
 
-### 7.3 13 条锚点（实现改动后必须仍绿）
+> 无红条。R1-REL-03—08 于 **T4** 转绿、R1-REL-09 于 **T5** 转绿、R1-REL-10 于 **T2b** 转绿，
+> 全部移入 §7.3 锚点表；各阶段的历史失败行原文保留在 §7.5.2 / §7.5.4 / §7.5.6。
+
+### 7.3 14 条锚点（实现改动后必须仍绿）
 
 | case | 断言要点 | 为什么满足（合同依据 + 代码位置） | 回归锚定对象 |
 |---|---|---|---|
@@ -317,20 +318,21 @@ java -cp "out/main:out/test:lib/sqlite-jdbc-3.46.1.3.jar" lab.ReliabilityCloseou
 | R1-REL-03 | transition（execute/complete/cancel）保存失败后状态不变 | **T4**：`transition` 只改候选（`storeApplication`）→ 单次 `commitState` → `publish`；提交失败内存原样（Registry.java） | 任一 transition 回到"先改内存后提交" = 回归 |
 | R1-REL-04 | dispatch 首次意图保存失败：outbox=0、create=0、申请仍 CREATED | **T4**：`dispatchApplication` ①先提交 PENDING 意图（失败即抛、端口不调用）②再调端口（Registry.java） | 意图未落盘就调外部端口 = 回归 |
 | R1-REL-05 | dispatch 第二次保存失败：不报成功，内存回到第一次提交快照（CREATED+PENDING），恢复先 query 不再 create | **T4**：第二次提交基于第一次快照的新候选，失败不 `publish`；`processOutbox` 对 PENDING 也先 query、`NOT_FOUND` 不重发（Registry.java） | 第二次提交失败仍返回成功 / 恢复时重复 create = 回归 |
-| R1-REL-06 | processOutbox 提交失败：create 不增加、状态回到已提交 | **T4**：`processOutbox` 每条 entry 独立候选 + 独立提交、失败即停；只 query 不 create（Registry.java） | 批量提交 / 盲目重发 = 回归 |
+| R1-REL-06 | processOutbox 提交失败：create 不增加、状态回到已提交；子断言 `query_accepted_updates_application_and_outbox`：query ACCEPTED 后 application=DISPATCHED 与 outbox=SENT 同一次提交、失败两侧一起回退 | **T4**：`processOutbox` 每条 entry 独立候选 + 独立提交、失败即停；**T5 补子断言**：`queryApplication` 把申请与 outbox 写同一候选，`armCommit(2)` 证明只提交一次、`armCommit(1)` 证明失败两侧回退（Registry.java） | 批量提交 / 盲目重发 / query 拆成两次提交 = 回归 |
 | R1-REL-07 | receiveCallback 提交失败：application 与 inbox 均不变 | **T4**：`receiveCallback` 把 inbox 记录与申请流转写进同一候选，一次提交（Registry.java） | 分两次提交 = 回归 |
 | R1-REL-08 | startWorkflow/advanceWorkflow 提交失败：三者不变 | **T4**：`startWorkflow` 单次提交；`advanceWorkflow` 把业务动作（含外部 create）与步骤推进写在同一候选，一次提交（REJECTED 只落失败意图、不推进）（Registry.java） | 步骤推进与业务动作分开提交 = 回归 |
+| R1-REL-09 | 超时（UNKNOWN/UNCERTAIN）后 workflow 保持 RUNNING 0/3、step0 PENDING；application 的业务结果与 workflow 同一次提交 | **T5**：`advanceWorkflow` 先在同一候选上执行业务动作，只有申请状态**达到或越过**目标阶段才写 `COMPLETED` 并 `index+1`；UNKNOWN / CANCELLED 不算达成（`hasReached` / `lifecycleRank`，Registry.java） | 超时/拒绝时步骤仍被标完成、或 index 乱跳 = 回归 |
 | R1-REL-10 | SqliteStorage(db,true) 的 `commitState` 与兼容 `save*` 在写 SQL 前抛 `STORAGE_READ_ONLY`（含候选本身非法的情形）；只读打开/拒写/关闭后库文件与 sidecar 的 bytes+size+mtime 不变；空库只读打开不迁移 | **T2b 落地**：第 1 层 `NOFOLLOW` 普通文件判定、第 2 层 `SQLiteConfig.setReadOnly(true)`、第 3 层不迁移、第 4 层 `checkWritable()` 先于 SQL、第 5 层由 case 断言（SqliteStorage.java） | 只读隔离与零写盘语义不得退化 |
 | R1-REL-11 | 只读 + 库不存在 / 目标是目录 / 目标是符号链接：一律 `READ_ONLY_STORAGE_NOT_FOUND`，不建目录、不建文件；`lab.Main sqlite readonly` 缺库时非零退出、首行 `ERR READ_ONLY_STORAGE_NOT_FOUND`、不建 `data/` | S1/T3「五层 readonly」：`SqliteStorage(Path,true)` 用 `Files.isRegularFile(NOFOLLOW_LINKS)` 判定（SqliteStorage.java）；启动路径沿用 `Main` 的 `RegistryException → ERR + exit 1`（Main.java:29-36） | 只读判定重构后零建盘与错误码语义不得丢 |
 | R1-REL-12 | 注入失败迁移：失败迁移的表不存在、成功迁移保留、版本不前进、autoCommit 恢复；首条即失败时版本保持 0 | S1/T6「Migration 事务 + 异常 rollback + finally 恢复 autoCommit」在基线已成立：`MigrationRunner.applyMigrationAtomically`（MigrationRunner.java:80-103） | 迁移事务与 autoCommit 恢复不得退化 |
 | R1-REL-13 | ProcessBuilder 跑 `lab.Main`：未知/重复/冲突参数 → 退出码 2，`ERR STARTUP_ARGUMENT <arg>` 或 `ERR STARTUP_CONFLICT <storage/fake>` 首行正确，且不进入命令循环（无 STATS/BYE） | S1/T6「启动参数 fail closed」在基线已成立：`StartupOptions.parse`（StartupOptions.java:35-87）+ `Main` 先解析、失败即 `System.exit(2)` 后才建库与读 stdin（Main.java:17-26） | 参数校验不得被挪到建库之后或吞掉退出码 |
 | R1-REL-14 | 三步 workflow 后 application 与 workflow 同时 COMPLETED、索引 3/3、三步全 COMPLETED，内存=已提交 | S1/T5「步骤完成绑定真实业务转换」正向路径在基线已成立：`advanceWorkflow` 先调 dispatch/execute/complete 再标本步完成（Registry.java:456-491） | 候选快照化后正向绑定不得丢 |
 
-**声明**：以上 **13 条**作为**回归锚点**，T4 之后的 T5/T6 及后续任何实现改动
-（workflow 步骤完成条件、迁移与启动参数）之后**必须仍然为绿**。任一条变红即视为回归，
+**声明**：以上 **14 条**作为**回归锚点**，T6 及后续任何实现改动（迁移与启动参数、
+PR2/PR3 的运行时与证据）之后**必须仍然为绿**。任一条变红即视为回归，
 不得通过改测试或放宽断言消红。
 
-**已知盲区**（锚点不覆盖、需另立 case 的部分；2026-10-24 T4 后更新）：
+**已知盲区**（锚点不覆盖、需另立 case 的部分；2026-10-24 T5 后更新）：
 
 - 01：不覆盖"PENDING 也要先 query"——**该形态已由 05 的恢复段覆盖**；
 - 02：不覆盖 `commitState` 五集合单次提交、FileStorage staging+`ATOMIC_MOVE`、SQLite 单事务（已由一次性探针 `T2Probe` 验证，见 §7.5.3；尚未固化为入库 case）；
@@ -338,6 +340,7 @@ java -cp "out/main:out/test:lib/sqlite-jdbc-3.46.1.3.jar" lab.ReliabilityCloseou
 - 10：第 2 层 `mode=ro` 的机制由一次性探针 `T2bProbe` 验证（见 §7.5.5），case 只断言"拒写 + 文件零变化"这一可观测结果；
 - 11：T2b 已补"目录 / 符号链接（NOFOLLOW）"与"`lab.Main sqlite readonly` 缺库启动"两个子断言；
 - 12：不覆盖非 `SQLException`（如 `RuntimeException`）时是否回滚——`catch` 只认 `SQLException`；
+- 09：覆盖 DISPATCH 步的超时形态；不覆盖 EXECUTE/COMPLETE 步的"状态不符"分支（例如 app 被手动 cancel 后再 advance）；
 - 13：覆盖启动参数 fail closed；仍不覆盖 `sqlite readonly` 之外的启动路径（如 `file` 模式建目录失败）；
 - 14：不覆盖负向绑定（application 未到位却把步骤标 COMPLETED、手动跳步）——超时形态由 09 覆盖。
 
@@ -354,6 +357,9 @@ java -cp "out/main:out/test:lib/sqlite-jdbc-3.46.1.3.jar" lab.ReliabilityCloseou
 
 > **T4 复核（2026-10-24）**：13 条锚点全绿；R1-REL-09 仍红，且失败行与 T2b 时**逐字节一致**
 > （`cmp` 退出 0，sha256 `a527a44c…`），确属 T5 范围。见 §7.5.6。
+
+> **T5 复核（2026-10-24）**：14 条锚点全绿，`RELIABILITY_R1_CASES_PASSED=14`、退出码 `0`；
+> 其余检查逐字节未变。见 §7.5.7。
 
 ### 7.5 T2/T2b 落地记录（存储层换代 + 只读加固，2026-10-23 实测）
 
@@ -495,5 +501,49 @@ REPLAY_EVIDENCE_CHECKS_PASSED=9
 
 **锚点有效性**：03—08 的转绿来自"候选 → 单次提交 → 成功后发布"本身；故障仍由
 `FaultStorage.armCommit/armWhen` 在提交点注入，锚点不是"恒真"。
+
+#### 7.5.7 T5 落地记录（Workflow 步骤完成条件绑定，2026-10-24 实测）
+
+**改动**：`Registry.advanceWorkflow`（新增两个私有辅助 `hasReached` / `lifecycleRank`）。
+
+- 每步目标：DISPATCH→DISPATCHED、EXECUTE→EXECUTING、COMPLETE→COMPLETED；
+- 先在同一候选快照上执行业务动作（dispatch / transition），再判断申请状态是否**达到或越过**目标阶段：
+  达成才写 `COMPLETED` 并 `index+1`（末步置 workflow COMPLETED）；
+  超时（UNKNOWN）、REJECTED、CANCELLED、状态不符时：步骤保持 `PENDING`、`currentStepIndex` 不动、
+  workflow 保持 `RUNNING`；
+- application 的业务结果与 workflow 推进**同一次 commit**，失败整体回退；
+- **为什么是"达到或越过"而不是严格等号**：30 个旧 case 的 `sqlite-basic-1` 会先
+  `application dispatch` + `callback STARTED`（app=EXECUTING）再 `workflow advance`，
+  DISPATCH 步按既有语义应追平为完成（`sqlite-basic-2` 期望 `RUNNING 1/3`）。
+  严格等号实测会把 `RUNNING 1/3` 退成 `0/3`，破坏 30/30（已由 `diff -r` 捕获并修正）。
+  UNKNOWN / CANCELLED 不在推进主线上，仍不算达成（R1-REL-09 的绿靠这一点）。
+
+**新增子断言**（写在 R1-REL-06 内，不新增编号）：`query_accepted_updates_application_and_outbox`
+——query ACCEPTED 后 application=DISPATCHED 且 outbox=SENT 落在同一次提交
+（`armCommit(2)` 证明只提交一次：若拆成两次提交，第 2 次会被注入失败）；
+提交失败时（`armCommit(1)`）两侧一起回退到 UNKNOWN / UNCERTAIN。
+
+**实测**（同一棵树，干净重编）：
+
+```text
+MAIN_JAVAC_EXIT=0
+TEST_JAVAC_EXIT=0
+  major version: 65
+RELIABILITY_R1_CASES_PASSED=14
+EXIT_CODE=0
+CHECKS_PASSED=279
+CONCURRENCY_CHECKS_PASSED=8
+SCENARIO_PARSER_CHECKS_PASSED=15
+SIMULATION_RUNTIME_CHECKS_PASSED=14
+REPLAY_EVIDENCE_CHECKS_PASSED=9
+CASES_TOTAL=30 CASES_PASSED=30 CASES_FAILED=0
+```
+
+- **R1-REL 输出前后差异只有 09**：`R1-REL-09 FAIL/INTENT` 两行 → `R1-REL-09 PASS`，
+  汇总 `FAILED=1/PASSED=13` → `PASSED=14`；其余 13 行逐行未变；
+- **五个检查类摘要行逐字节一致**：`cmp` 退出 `0`，两侧 sha256 均为
+  `8d541511f28fdf91b7aa7b2b820261f60347549dc7e318f1e5c9b282e0d539c5`；
+- **30 个旧 case 的 60 个产物 `diff -r` 无差异**（`CASE_RUNS_DIFF_EXIT=0`）。
+
 
 
