@@ -11,6 +11,7 @@ import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.AbstractList;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -65,9 +66,11 @@ public final class ReliabilityCloseoutChecks {
     private static final String INTENT_11 =
             "只读打开不存在的库必须报 READ_ONLY_STORAGE_NOT_FOUND，且不创建目录/文件";
     private static final String INTENT_12 =
-            "MigrationRunner.run 注入失败迁移：失败迁移的表不存在、版本不前进、autoCommit 恢复";
+            "MigrationRunner.run 注入失败迁移：失败迁移的表不存在、版本不前进、autoCommit 恢复；"
+                    + "注入 RuntimeException（非 SQLException）同样必须整体回滚";
     private static final String INTENT_13 =
-            "ProcessBuilder 跑 lab.Main：未知/重复/冲突参数退出码=2，且不进入命令循环";
+            "ProcessBuilder 跑 lab.Main：未知/重复/冲突参数（含重复 storage、重复 fake、混合冲突、--help）"
+                    + "退出码=2，且不进入命令循环";
     private static final String INTENT_14 =
             "三步 workflow 后 application 与 workflow 必须同时 COMPLETED，且已提交快照一致";
 
@@ -708,6 +711,43 @@ public final class ReliabilityCloseoutChecks {
                             "autoCommit=" + conn2.getAutoCommit() + " 期望恢复为 " + originalAutoCommit2);
                 }
             }
+
+            // 子断言：注入 RuntimeException（非 SQLException）也必须整体回滚、恢复 autoCommit
+            Path db3 = tmp.resolve("db3.sqlite");
+            try (Connection conn3 = DriverManager.getConnection("jdbc:sqlite:" + db3)) {
+                boolean originalAutoCommit3 = conn3.getAutoCommit();
+                List<String> runtimeFailure = new AbstractList<String>() {
+                    @Override
+                    public String get(int index) {
+                        if (index == 0) {
+                            return "CREATE TABLE r1_runtime_bad (id INTEGER)";
+                        }
+                        throw new IllegalStateException("INJECTED_RUNTIME_FAILURE");
+                    }
+
+                    @Override
+                    public int size() {
+                        return 2;
+                    }
+                };
+
+                Throwable thrown3 = null;
+                try {
+                    MigrationRunner.run(conn3,
+                            List.of(new Migration(1, "runtime-failure", runtimeFailure)));
+                } catch (RuntimeException e) {
+                    thrown3 = e;
+                }
+                require(thrown3 instanceof IllegalStateException,
+                        "注入 RuntimeException 后抛出=" + describe(thrown3)
+                                + " 期望=IllegalStateException");
+                require(!tableExists(conn3, "r1_runtime_bad"),
+                        "RuntimeException 时部分迁移被提交（表 r1_runtime_bad 仍存在，未回滚）");
+                require(MigrationRunner.currentVersion(conn3) == 0,
+                        "版本=" + MigrationRunner.currentVersion(conn3) + " 期望=0（不得前进）");
+                require(conn3.getAutoCommit() == originalAutoCommit3,
+                        "autoCommit=" + conn3.getAutoCommit() + " 期望恢复为 " + originalAutoCommit3);
+            }
         } finally {
             deleteRecursively(tmp);
         }
@@ -731,6 +771,15 @@ public final class ReliabilityCloseoutChecks {
                 new String[]{"file", "sqlite"}, "ERR STARTUP_CONFLICT storage");
         runMainExpectStartupError(javaExe, classPath, workDir,
                 new String[]{"fake-accept", "fake-reject"}, "ERR STARTUP_CONFLICT fake");
+        // 重复参数 / 混合冲突 / 未知选项：同样退出码 2 且不进命令循环
+        runMainExpectStartupError(javaExe, classPath, workDir,
+                new String[]{"file", "file"}, "ERR STARTUP_CONFLICT storage");
+        runMainExpectStartupError(javaExe, classPath, workDir,
+                new String[]{"fake-timeout-created", "fake-accept"}, "ERR STARTUP_CONFLICT fake");
+        runMainExpectStartupError(javaExe, classPath, workDir,
+                new String[]{"sqlite", "readonly", "file"}, "ERR STARTUP_CONFLICT storage");
+        runMainExpectStartupError(javaExe, classPath, workDir,
+                new String[]{"--help"}, "ERR STARTUP_ARGUMENT --help");
     }
 
     private static void runMainExpectStartupError(Path javaExe, String classPath, Path workDir,
