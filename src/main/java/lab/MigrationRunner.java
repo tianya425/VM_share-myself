@@ -75,7 +75,11 @@ public class MigrationRunner {
      * 把一条 Migration 的所有语句和版本更新放在同一事务里。
      *
      * <p>任一步失败则整体回滚，不留部分表、不前进版本。
-     * 完成后恢复原 autoCommit 值。
+     * 失败既可能是 {@link SQLException}（SQL 错误），也可能是 {@link RuntimeException}
+     * （驱动或迁移定义在运行期抛出）——两种都必须回滚；否则 finally 里恢复 autoCommit
+     * 会把未完成的事务提交掉，留下"部分迁移"。
+     *
+     * <p>完成后恢复原 autoCommit 值。
      */
     private static void applyMigrationAtomically(Connection conn, Migration m) throws SQLException {
         boolean originalAutoCommit = conn.getAutoCommit();
@@ -94,7 +98,7 @@ public class MigrationRunner {
             }
             // 3. 提交
             conn.commit();
-        } catch (SQLException e) {
+        } catch (SQLException | RuntimeException e) {
             conn.rollback();
             throw e;
         } finally {

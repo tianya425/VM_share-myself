@@ -1,63 +1,32 @@
 package lab;
 
-import java.util.ArrayList;
-import java.util.List;
-
+/**
+ * 内存存储：copy-on-write。
+ *
+ * <p>已提交状态是一个不可变引用。{@link #commitState(RegistryState)} 先把候选状态
+ * 深拷贝到局部变量，拷贝成功后才替换已提交引用；任何失败都不会让对外可见的状态
+ * 变成"改了一半"。
+ *
+ * <p>{@link #loadState()} 返回深拷贝，调用方拿到的列表与内部状态互不影响。
+ */
 public class MemoryStorage implements Storage {
 
-    private List<Point> points = new ArrayList<>();
-    private List<TransferApplication> applications = new ArrayList<>();
-    private List<OutboxEntry> outbox = new ArrayList<>();
-    private List<InboxEntry> inbox = new ArrayList<>();
-    private List<WorkflowInstance> workflows = new ArrayList<>();
+    private RegistryState committed = RegistryState.empty();
 
     @Override
-    public List<Point> loadPoints() {
-        return new ArrayList<>(points);
+    public synchronized RegistryState loadState() {
+        return deepCopy(committed);
     }
 
     @Override
-    public List<TransferApplication> loadApplications() {
-        return new ArrayList<>(applications);
+    public synchronized void commitState(RegistryState next) {
+        // 先深拷贝（RegistryState 构造器会复制五个集合与 steps），成功后才发布
+        RegistryState candidate = deepCopy(next);
+        this.committed = candidate;
     }
 
-    @Override
-    public List<OutboxEntry> loadOutbox() {
-        return new ArrayList<>(outbox);
-    }
-
-    @Override
-    public List<InboxEntry> loadInbox() {
-        return new ArrayList<>(inbox);
-    }
-
-    @Override
-    public List<WorkflowInstance> loadWorkflows() {
-        return new ArrayList<>(workflows);
-    }
-
-    @Override
-    public void savePoints(List<Point> points) {
-        this.points = new ArrayList<>(points);
-    }
-
-    @Override
-    public void saveApplications(List<TransferApplication> applications) {
-        this.applications = new ArrayList<>(applications);
-    }
-
-    @Override
-    public void saveOutbox(List<OutboxEntry> outbox) {
-        this.outbox = new ArrayList<>(outbox);
-    }
-
-    @Override
-    public void saveInbox(List<InboxEntry> inbox) {
-        this.inbox = new ArrayList<>(inbox);
-    }
-
-    @Override
-    public void saveWorkflows(List<WorkflowInstance> workflows) {
-        this.workflows = new ArrayList<>(workflows);
+    private static RegistryState deepCopy(RegistryState state) {
+        return new RegistryState(state.points(), state.applications(), state.outbox(),
+                state.inbox(), state.workflows());
     }
 }

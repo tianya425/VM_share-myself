@@ -35,21 +35,36 @@ public class Main {
             return;
         }
 
-        RcsExecutionPort rcsPort = new FakeRcsAdapter(options.fakeMode());
-        Registry registry = new Registry(storage, rcsPort, options.readOnly());
+        // 用 try-with-resources 管住存储资源：SqliteStorage 持有数据库连接，必须 close()
+        try (AutoCloseable resource = closeable(storage)) {
+            RcsExecutionPort rcsPort = new FakeRcsAdapter(options.fakeMode());
+            Registry registry = new Registry(storage, rcsPort, options.readOnly());
 
-        String line;
-        while ((line = in.readLine()) != null) {
-            line = line.trim();
-            if (line.isEmpty()) {
-                continue;
-            }
-            String[] parts = line.split("[ \t]+");
-            boolean keepGoing = handleLine(parts, registry, out);
-            if (!keepGoing) {
-                return;
+            String line;
+            while ((line = in.readLine()) != null) {
+                line = line.trim();
+                if (line.isEmpty()) {
+                    continue;
+                }
+                String[] parts = line.split("[ \t]+");
+                boolean keepGoing = handleLine(parts, registry, out);
+                if (!keepGoing) {
+                    return;
+                }
             }
         }
+    }
+
+    /**
+     * 把 Storage 适配成可关闭资源：实现 {@link AutoCloseable} 的（如 SqliteStorage）关它自己，
+     * 其余（内存 / 文件）为空操作。
+     */
+    private static AutoCloseable closeable(Storage storage) {
+        if (storage instanceof AutoCloseable resource) {
+            return resource;
+        }
+        return () -> {
+        };
     }
 
     private static boolean handleLine(String[] parts, Registry registry, PrintWriter out) {

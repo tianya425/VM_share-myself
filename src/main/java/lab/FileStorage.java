@@ -2,15 +2,34 @@ package lab;
 
 import java.io.BufferedReader;
 import java.io.IOException;
-import java.io.PrintWriter;
+import java.io.Writer;
+import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.List;
 
+/**
+ * 文件存储：整状态原子提交。
+ *
+ * <p>提交顺序固定为：
+ * <ol>
+ *   <li>把五个集合各自写进同目录的 {@code *.staging} 暂存文件，写完 flush 并 fsync；</li>
+ *   <li>全部暂存文件写成功之后，才逐个用
+ *       {@code Files.move(ATOMIC_MOVE, REPLACE_EXISTING)} 替换旧文件。</li>
+ * </ol>
+ *
+ * <p>任一步失败：删除暂存文件并抛异常，旧快照保持可用（不会出现"写了一半"的正式文件）。
+ */
 public class FileStorage implements Storage {
 
+    private static final String STAGING_SUFFIX = ".staging";
+
+    private final Path dataDir;
     private final Path pointsFile;
     private final Path applicationsFile;
     private final Path outboxFile;
@@ -23,6 +42,7 @@ public class FileStorage implements Storage {
         } catch (IOException e) {
             throw new RuntimeException("cannot create data dir: " + dataDir, e);
         }
+        this.dataDir = dataDir;
         this.pointsFile = dataDir.resolve("points.txt");
         this.applicationsFile = dataDir.resolve("applications.txt");
         this.outboxFile = dataDir.resolve("outbox.txt");
@@ -31,260 +51,270 @@ public class FileStorage implements Storage {
     }
 
     @Override
-    public List<Point> loadPoints() {
+    public RegistryState loadState() {
+        return new RegistryState(
+                readPoints(),
+                readApplications(),
+                readOutbox(),
+                readInbox(),
+                readWorkflows());
+    }
+
+    @Override
+    public void commitState(RegistryState next) {
+        List<Path> stagingFiles = new ArrayList<>();
+        try {
+            stagingFiles.add(writeStaging(pointsFile, formatPoints(next.points())));
+            stagingFiles.add(writeStaging(applicationsFile, formatApplications(next.applications())));
+            stagingFiles.add(writeStaging(outboxFile, formatOutbox(next.outbox())));
+            stagingFiles.add(writeStaging(inboxFile, formatInbox(next.inbox())));
+            stagingFiles.add(writeStaging(workflowsFile, formatWorkflows(next.workflows())));
+
+            moveIntoPlace(pointsFile, stagingFiles.get(0));
+            moveIntoPlace(applicationsFile, stagingFiles.get(1));
+            moveIntoPlace(outboxFile, stagingFiles.get(2));
+            moveIntoPlace(inboxFile, stagingFiles.get(3));
+            moveIntoPlace(workflowsFile, stagingFiles.get(4));
+        } catch (IOException e) {
+            for (Path staging : stagingFiles) {
+                try {
+                    Files.deleteIfExists(staging);
+                } catch (IOException cleanupFailure) {
+                    e.addSuppressed(cleanupFailure);
+                }
+            }
+            throw new RuntimeException("cannot commit state: " + dataDir, e);
+        }
+    }
+
+    // ---------- 提交辅助 ----------
+
+    private Path writeStaging(Path target, String content) throws IOException {
+        Path staging = target.resolveSibling(target.getFileName() + STAGING_SUFFIX);
+        try (Writer writer = Files.newBufferedWriter(staging, StandardCharsets.UTF_8)) {
+            writer.write(content);
+            writer.flush();
+        }
+        try (FileChannel channel = FileChannel.open(staging, StandardOpenOption.WRITE)) {
+            channel.force(true);
+        }
+        return staging;
+    }
+
+    private void moveIntoPlace(Path target, Path staging) throws IOException {
+        try {
+            Files.move(staging, target,
+                    StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+        } catch (AtomicMoveNotSupportedException e) {
+            throw new IOException("atomic move not supported: " + staging + " -> " + target, e);
+        }
+    }
+
+    private static String formatPoints(List<Point> points) {
+        StringBuilder builder = new StringBuilder();
+        for (Point p : points) {
+            builder.append("P|").append(p.pointId()).append('|').append(p.name()).append('\n');
+        }
+        return builder.toString();
+    }
+
+    private static String formatApplications(List<TransferApplication> applications) {
+        StringBuilder builder = new StringBuilder();
+        for (TransferApplication a : applications) {
+            String external = a.externalOrderId() == null ? "" : a.externalOrderId();
+            builder.append("A|").append(a.applicationId()).append('|')
+                    .append(a.fromPointId()).append('|')
+                    .append(a.toPointId()).append('|')
+                    .append(a.state().name()).append('|')
+                    .append(external).append('\n');
+        }
+        return builder.toString();
+    }
+
+    private static String formatOutbox(List<OutboxEntry> outbox) {
+        StringBuilder builder = new StringBuilder();
+        for (OutboxEntry e : outbox) {
+            String external = e.externalOrderId() == null ? "" : e.externalOrderId();
+            builder.append("O|").append(e.entryId()).append('|')
+                    .append(e.applicationId()).append('|')
+                    .append(e.fromPointId()).append('|')
+                    .append(e.toPointId()).append('|')
+                    .append(e.status().name()).append('|')
+                    .append(external).append('|')
+                    .append(e.attempts()).append('\n');
+        }
+        return builder.toString();
+    }
+
+    private static String formatInbox(List<InboxEntry> inbox) {
+        StringBuilder builder = new StringBuilder();
+        for (InboxEntry e : inbox) {
+            String reason = e.reason() == null ? "" : e.reason();
+            builder.append("I|").append(e.entryId()).append('|')
+                    .append(e.applicationId()).append('|')
+                    .append(e.eventType()).append('|')
+                    .append(e.status().name()).append('|')
+                    .append(reason).append('\n');
+        }
+        return builder.toString();
+    }
+
+    private static String formatWorkflows(List<WorkflowInstance> workflows) {
+        StringBuilder builder = new StringBuilder();
+        for (WorkflowInstance wf : workflows) {
+            StringBuilder steps = new StringBuilder();
+            for (int i = 0; i < wf.steps().size(); i++) {
+                if (i > 0) {
+                    steps.append(',');
+                }
+                WorkflowStep step = wf.steps().get(i);
+                steps.append(step.name()).append(':').append(step.state().name());
+            }
+            builder.append("W|").append(wf.instanceId()).append('|')
+                    .append(wf.applicationId()).append('|')
+                    .append(wf.state().name()).append('|')
+                    .append(wf.currentStepIndex()).append('|')
+                    .append(steps).append('\n');
+        }
+        return builder.toString();
+    }
+
+    // ---------- 读取 ----------
+
+    private List<Point> readPoints() {
         List<Point> result = new ArrayList<>();
-        if (!Files.exists(pointsFile)) {
-            return result;
-        }
-        try (BufferedReader r = Files.newBufferedReader(pointsFile, StandardCharsets.UTF_8)) {
-            String line;
-            while ((line = r.readLine()) != null) {
-                if (line.isEmpty()) {
-                    continue;
-                }
-                String[] parts = line.split("\\|", -1);
-                if (parts.length != 3 || !parts[0].equals("P")) {
-                    continue;
-                }
-                result.add(new Point(parts[1], parts[2]));
+        for (String[] parts : readLines(pointsFile)) {
+            if (parts.length != 3 || !parts[0].equals("P")) {
+                continue;
             }
-        } catch (IOException e) {
-            throw new RuntimeException("cannot load points", e);
+            result.add(new Point(parts[1], parts[2]));
         }
         return result;
     }
 
-    @Override
-    public List<TransferApplication> loadApplications() {
+    private List<TransferApplication> readApplications() {
         List<TransferApplication> result = new ArrayList<>();
-        if (!Files.exists(applicationsFile)) {
-            return result;
-        }
-        try (BufferedReader r = Files.newBufferedReader(applicationsFile, StandardCharsets.UTF_8)) {
-            String line;
-            while ((line = r.readLine()) != null) {
-                if (line.isEmpty()) {
-                    continue;
-                }
-                String[] parts = line.split("\\|", -1);
-                if (parts.length != 6 || !parts[0].equals("A")) {
-                    continue;
-                }
-                ApplicationState state;
-                try {
-                    state = ApplicationState.valueOf(parts[4]);
-                } catch (IllegalArgumentException e) {
-                    continue;
-                }
-                String externalOrderId = parts[5].isEmpty() ? null : parts[5];
-                result.add(new TransferApplication(parts[1], parts[2], parts[3], state, externalOrderId));
+        for (String[] parts : readLines(applicationsFile)) {
+            if (parts.length != 6 || !parts[0].equals("A")) {
+                continue;
             }
-        } catch (IOException e) {
-            throw new RuntimeException("cannot load applications", e);
+            ApplicationState state;
+            try {
+                state = ApplicationState.valueOf(parts[4]);
+            } catch (IllegalArgumentException e) {
+                continue;
+            }
+            String externalOrderId = parts[5].isEmpty() ? null : parts[5];
+            result.add(new TransferApplication(parts[1], parts[2], parts[3], state, externalOrderId));
         }
         return result;
     }
 
-    @Override
-    public List<OutboxEntry> loadOutbox() {
+    private List<OutboxEntry> readOutbox() {
         List<OutboxEntry> result = new ArrayList<>();
-        if (!Files.exists(outboxFile)) {
-            return result;
-        }
-        try (BufferedReader r = Files.newBufferedReader(outboxFile, StandardCharsets.UTF_8)) {
-            String line;
-            while ((line = r.readLine()) != null) {
-                if (line.isEmpty()) {
-                    continue;
-                }
-                String[] parts = line.split("\\|", -1);
-                if (parts.length != 8 || !parts[0].equals("O")) {
-                    continue;
-                }
-                OutboxStatus status;
-                try {
-                    status = OutboxStatus.valueOf(parts[5]);
-                } catch (IllegalArgumentException e) {
-                    continue;
-                }
-                String externalOrderId = parts[6].isEmpty() ? null : parts[6];
-                int attempts;
-                try {
-                    attempts = Integer.parseInt(parts[7]);
-                } catch (NumberFormatException e) {
-                    continue;
-                }
-                result.add(new OutboxEntry(parts[1], parts[2], parts[3], parts[4],
-                        status, externalOrderId, attempts));
+        for (String[] parts : readLines(outboxFile)) {
+            if (parts.length != 8 || !parts[0].equals("O")) {
+                continue;
             }
-        } catch (IOException e) {
-            throw new RuntimeException("cannot load outbox", e);
+            OutboxStatus status;
+            try {
+                status = OutboxStatus.valueOf(parts[5]);
+            } catch (IllegalArgumentException e) {
+                continue;
+            }
+            String externalOrderId = parts[6].isEmpty() ? null : parts[6];
+            int attempts;
+            try {
+                attempts = Integer.parseInt(parts[7]);
+            } catch (NumberFormatException e) {
+                continue;
+            }
+            result.add(new OutboxEntry(parts[1], parts[2], parts[3], parts[4],
+                    status, externalOrderId, attempts));
         }
         return result;
     }
 
-    @Override
-    public List<InboxEntry> loadInbox() {
+    private List<InboxEntry> readInbox() {
         List<InboxEntry> result = new ArrayList<>();
-        if (!Files.exists(inboxFile)) {
-            return result;
-        }
-        try (BufferedReader r = Files.newBufferedReader(inboxFile, StandardCharsets.UTF_8)) {
-            String line;
-            while ((line = r.readLine()) != null) {
-                if (line.isEmpty()) {
-                    continue;
-                }
-                String[] parts = line.split("\\|", -1);
-                if (parts.length != 6 || !parts[0].equals("I")) {
-                    continue;
-                }
-                InboxStatus status;
-                try {
-                    status = InboxStatus.valueOf(parts[4]);
-                } catch (IllegalArgumentException e) {
-                    continue;
-                }
-                result.add(new InboxEntry(parts[1], parts[2], parts[3], status, parts[5]));
+        for (String[] parts : readLines(inboxFile)) {
+            if (parts.length != 6 || !parts[0].equals("I")) {
+                continue;
             }
-        } catch (IOException e) {
-            throw new RuntimeException("cannot load inbox", e);
+            InboxStatus status;
+            try {
+                status = InboxStatus.valueOf(parts[4]);
+            } catch (IllegalArgumentException e) {
+                continue;
+            }
+            result.add(new InboxEntry(parts[1], parts[2], parts[3], status, parts[5]));
         }
         return result;
     }
 
-    @Override
-    public List<WorkflowInstance> loadWorkflows() {
+    private List<WorkflowInstance> readWorkflows() {
         List<WorkflowInstance> result = new ArrayList<>();
-        if (!Files.exists(workflowsFile)) {
-            return result;
-        }
-        try (BufferedReader r = Files.newBufferedReader(workflowsFile, StandardCharsets.UTF_8)) {
-            String line;
-            while ((line = r.readLine()) != null) {
-                if (line.isEmpty()) {
-                    continue;
-                }
-                String[] parts = line.split("\\|", -1);
-                if (parts.length != 6 || !parts[0].equals("W")) {
-                    continue;
-                }
-                WorkflowState state;
-                try {
-                    state = WorkflowState.valueOf(parts[3]);
-                } catch (IllegalArgumentException e) {
-                    continue;
-                }
-                int currentStepIndex;
-                try {
-                    currentStepIndex = Integer.parseInt(parts[4]);
-                } catch (NumberFormatException e) {
-                    continue;
-                }
-                List<WorkflowStep> steps = new ArrayList<>();
-                boolean ok = true;
-                for (String stepText : parts[5].split(",")) {
-                    String[] kv = stepText.split(":", -1);
-                    if (kv.length != 2) {
-                        ok = false;
-                        break;
-                    }
-                    WorkflowStepState stepState;
-                    try {
-                        stepState = WorkflowStepState.valueOf(kv[1]);
-                    } catch (IllegalArgumentException e) {
-                        ok = false;
-                        break;
-                    }
-                    steps.add(new WorkflowStep(kv[0], stepState));
-                }
-                if (!ok) {
-                    continue;
-                }
-                result.add(new WorkflowInstance(parts[1], parts[2], state,
-                        currentStepIndex, List.copyOf(steps)));
+        for (String[] parts : readLines(workflowsFile)) {
+            if (parts.length != 6 || !parts[0].equals("W")) {
+                continue;
             }
-        } catch (IOException e) {
-            throw new RuntimeException("cannot load workflows", e);
+            WorkflowState state;
+            try {
+                state = WorkflowState.valueOf(parts[3]);
+            } catch (IllegalArgumentException e) {
+                continue;
+            }
+            int currentStepIndex;
+            try {
+                currentStepIndex = Integer.parseInt(parts[4]);
+            } catch (NumberFormatException e) {
+                continue;
+            }
+            List<WorkflowStep> steps = new ArrayList<>();
+            boolean ok = true;
+            for (String stepText : parts[5].split(",")) {
+                String[] kv = stepText.split(":", -1);
+                if (kv.length != 2) {
+                    ok = false;
+                    break;
+                }
+                WorkflowStepState stepState;
+                try {
+                    stepState = WorkflowStepState.valueOf(kv[1]);
+                } catch (IllegalArgumentException e) {
+                    ok = false;
+                    break;
+                }
+                steps.add(new WorkflowStep(kv[0], stepState));
+            }
+            if (!ok) {
+                continue;
+            }
+            result.add(new WorkflowInstance(parts[1], parts[2], state,
+                    currentStepIndex, List.copyOf(steps)));
         }
         return result;
     }
 
-    @Override
-    public void savePoints(List<Point> points) {
-        try (PrintWriter w = new PrintWriter(Files.newBufferedWriter(pointsFile, StandardCharsets.UTF_8))) {
-            for (Point p : points) {
-                w.println("P|" + p.pointId() + "|" + p.name());
-            }
-        } catch (IOException e) {
-            throw new RuntimeException("cannot save points", e);
+    /**
+     * 读一个文件并切成 {@code |} 分隔的字段；文件不存在时返回空列表，空行跳过。
+     */
+    private List<String[]> readLines(Path file) {
+        List<String[]> result = new ArrayList<>();
+        if (!Files.exists(file)) {
+            return result;
         }
-    }
-
-    @Override
-    public void saveApplications(List<TransferApplication> applications) {
-        try (PrintWriter w = new PrintWriter(Files.newBufferedWriter(applicationsFile, StandardCharsets.UTF_8))) {
-            for (TransferApplication a : applications) {
-                String external = a.externalOrderId() == null ? "" : a.externalOrderId();
-                w.println("A|" + a.applicationId() + "|" + a.fromPointId()
-                        + "|" + a.toPointId() + "|" + a.state().name()
-                        + "|" + external);
-            }
-        } catch (IOException e) {
-            throw new RuntimeException("cannot save applications", e);
-        }
-    }
-
-    @Override
-    public void saveOutbox(List<OutboxEntry> outbox) {
-        try (PrintWriter w = new PrintWriter(Files.newBufferedWriter(outboxFile, StandardCharsets.UTF_8))) {
-            for (OutboxEntry e : outbox) {
-                String external = e.externalOrderId() == null ? "" : e.externalOrderId();
-                w.println("O|" + e.entryId() + "|" + e.applicationId()
-                        + "|" + e.fromPointId() + "|" + e.toPointId()
-                        + "|" + e.status().name()
-                        + "|" + external
-                        + "|" + e.attempts());
-            }
-        } catch (IOException e) {
-            throw new RuntimeException("cannot save outbox", e);
-        }
-    }
-
-    @Override
-    public void saveInbox(List<InboxEntry> inbox) {
-        try (PrintWriter w = new PrintWriter(Files.newBufferedWriter(inboxFile, StandardCharsets.UTF_8))) {
-            for (InboxEntry e : inbox) {
-                String reason = e.reason() == null ? "" : e.reason();
-                w.println("I|" + e.entryId() + "|" + e.applicationId()
-                        + "|" + e.eventType()
-                        + "|" + e.status().name()
-                        + "|" + reason);
-            }
-        } catch (IOException e) {
-            throw new RuntimeException("cannot save inbox", e);
-        }
-    }
-
-    @Override
-    public void saveWorkflows(List<WorkflowInstance> workflows) {
-        try (PrintWriter w = new PrintWriter(Files.newBufferedWriter(workflowsFile, StandardCharsets.UTF_8))) {
-            for (WorkflowInstance wf : workflows) {
-                StringBuilder steps = new StringBuilder();
-                for (int i = 0; i < wf.steps().size(); i++) {
-                    if (i > 0) {
-                        steps.append(",");
-                    }
-                    WorkflowStep step = wf.steps().get(i);
-                    steps.append(step.name()).append(":").append(step.state().name());
+        try (BufferedReader reader = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (line.isEmpty()) {
+                    continue;
                 }
-                w.println("W|" + wf.instanceId() + "|" + wf.applicationId()
-                        + "|" + wf.state().name()
-                        + "|" + wf.currentStepIndex()
-                        + "|" + steps);
+                result.add(line.split("\\|", -1));
             }
         } catch (IOException e) {
-            throw new RuntimeException("cannot save workflows", e);
+            throw new RuntimeException("cannot read " + file, e);
         }
+        return result;
     }
 }
