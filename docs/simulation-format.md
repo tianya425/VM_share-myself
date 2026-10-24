@@ -1,27 +1,29 @@
-# 仿真场景格式
+# 仿真场景与证据格式
 
 | 文档属性 | 内容 |
 |---|---|
-| 版本 | V0.1 |
-| 日期 | 2026-10-04 |
-| 类型 | 场景文件格式说明 |
+| 版本 | V0.2 |
+| 日期 | 2026-10-24 |
+| 类型 | 场景文件与 Evidence 格式说明 |
 | 对应正式文档 | IDS 仿真、回放与验证架构说明书 |
-| 状态 | DRAFT |
+| 状态 | FROZEN（随 PR3 交付冻结） |
+| 绑定代码 | `lab.simulation.ScenarioParser` / `EvidenceBundleValidator` / `EvidenceBundleWriter` / `ReplayComparator` |
 
 ## 文档说明
 
-本文件定义 `scenarios/*.scenario` 的语法规则。
+本文件定义 `scenarios/*.scenario` 的语法、稳定错误码，以及一次 `run` 产生的 Evidence 目录结构（7 个文件、`run-summary.txt` 的 21 个固定字段、三个 TSV 的列格式）和回放比较规则。
 
 **它做什么：**
 
 - 说明每条记录类型的字段和顺序
 - 说明允许的 action、outcome 和 oracle 类型
-- 说明稳定错误码
+- 说明 Parser 与 Evidence 校验的稳定错误码
+- 逐字固定 Evidence 的 7 个文件、21 个字段与列格式
 
 **它不做什么：**
 
-- 不定义运行时行为（见 `simulation-boundary.md`）
-- 不定义 Evidence 结构（第三阶段）
+- 不定义运行时业务语义（见 `simulation-boundary.md`）
+- 不定义真实 M4 / Lab / 生产合同
 
 ## 文件编码
 
@@ -29,23 +31,28 @@
 - LF 换行
 - 无 BOM
 - 无 NUL
+- 单文件不超过 1 MiB
 
-## 记录类型
+## 场景记录类型
 
 ### SCENARIO
 
     SCENARIO <scenarioId> <version>
 
-- scenarioId：字母数字开头，允许大写字母、数字、下划线、连字符，最长 64
-- version：≥ 1
+- scenarioId：字母或数字开头，允许大写字母、数字、下划线、连字符，最长 64
+- version：≥ 1；当前 Parser 只接受 `1`
 
 ### START_AT
 
     START_AT <ISO-8601 Instant>
 
+虚拟时间的起点。运行期只使用虚拟时间，不读取系统当前时间。
+
 ### SEED
 
     SEED <long>
+
+根种子，写入 `run-summary.txt` 的 `rootSeed`。
 
 ### EXTERNAL
 
@@ -101,7 +108,9 @@ ACCEPTED 和 TIMEOUT_BUT_CREATED 必须提供 externalOrderId；其余使用 `-`
 | VALID_EXTERNAL_ORDERS | 2 | applicationId, count |
 | NO_DUPLICATE_EXTERNAL_ORDER | 1 | applicationId |
 
-## 稳定错误码
+## Parser 稳定错误码
+
+`SimulationMain validate/run` 遇到这些错误时输出 `ERR <code> [detail]` 并以退出码 2 结束。
 
 | code | 含义 |
 |---|---|
@@ -117,8 +126,129 @@ ACCEPTED 和 TIMEOUT_BUT_CREATED 必须提供 externalOrderId；其余使用 `-`
 | SCENARIO_UNKNOWN_ACTION | action 或 outcome 不合法 |
 | SCENARIO_UNKNOWN_ORACLE | ruleType 不合法 |
 | SCENARIO_ARGUMENT_COUNT | 参数数量错误 |
-| TIME_TRAVEL_BACKWARD | 运行时时钟倒退 |
-| UNSCRIPTED_EXTERNAL_CALL | 未脚本化的外部调用 |
+| TIME_TRAVEL_BACKWARD | 运行时时钟倒退（运行期，退出码 1） |
+| UNSCRIPTED_EXTERNAL_CALL | 未脚本化的外部调用（运行期，退出码 1） |
+
+## Evidence 目录（7 个文件）
+
+一次 `run` 在目标目录发布且只发布以下 7 个文件（目录必须是普通目录，文件必须是普通文件，软链接一律拒绝）：
+
+| # | 文件 | 说明 |
+|---:|---|---|
+| 1 | `scenario.scenario` | 被执行场景的原始字节副本 |
+| 2 | `scenario.sha256` | 单行：`<64 位小写 hex>  scenario.scenario` |
+| 3 | `run-summary.txt` | 21 个固定字段，每行 `key=value`，顺序不可变 |
+| 4 | `event-timeline.tsv` | 事件时间线，表头固定 |
+| 5 | `external-interactions.tsv` | 外部交互时间线，表头固定 |
+| 6 | `oracle-results.tsv` | 六条系统不变量 + 场景 EXPECT 的结果 |
+| 7 | `manifest.sha256` | 恰好 6 行，不含自身，按文件名升序 |
+
+发布方式：同父目录建 `.staging-<UUID>` → 写 6 个内容文件 + manifest → 发布前校验 → `Files.move(ATOMIC_MOVE)` → 发布后校验。目标目录已存在时直接拒绝（`EVIDENCE_DIR_EXISTS`），不复用、不覆盖、不合并。
+
+### run-summary.txt：21 个固定字段
+
+`schemaVersion=2`。字段顺序固定，校验器逐行核对 `key=` 前缀，并核对 `plannedEventCount == passCount + failCount + skippedCount`、`executedEventCount == passCount + failCount`。
+
+| # | 字段 | 说明 |
+|---:|---|---|
+| 1 | `scenarioId` | 场景编号 |
+| 2 | `scenarioVersion` | 场景版本 |
+| 3 | `scenarioDigest` | `scenario.scenario` 原始字节的 SHA-256（小写 hex） |
+| 4 | `rootSeed` | 场景 SEED |
+| 5 | `virtualStartAt` | 场景 START_AT |
+| 6 | `schemaVersion` | 证据结构版本，固定 `2` |
+| 7 | `runStatus` | `COMPLETED` / `FAILED` / `INCONCLUSIVE` |
+| 8 | `plannedEventCount` | 计划事件数 |
+| 9 | `executedEventCount` | 实际执行事件数（首错即停后不再增加） |
+| 10 | `passCount` | 通过事件数 |
+| 11 | `failCount` | 失败事件数 |
+| 12 | `skippedCount` | 跳过事件数 |
+| 13 | `firstFailureEventId` | 首个失败事件编号；无失败时为 `-` |
+| 14 | `firstFailureCode` | 首个失败稳定 code；无失败时为 `-` |
+| 15 | `oraclePassCount` | Oracle 结果 PASS 数 |
+| 16 | `oracleFailCount` | Oracle 结果 FAIL 数 |
+| 17 | `createCallCount` | CREATE 外部调用次数 |
+| 18 | `queryCallCount` | QUERY 外部调用次数 |
+| 19 | `validExternalOrderCount` | 有效外部订单数 |
+| 20 | `evidenceLevel` | 证据等级，固定 `LOCAL_SIMULATION` |
+| 21 | `realExternalWriteCount` | 真实外部写次数，固定 `0` |
+
+### event-timeline.tsv
+
+表头逐字固定：
+
+    eventId	plannedOffsetMillis	logicalSequence	action	status	virtualOccurredAt	detail
+
+- 表头之外的行数必须等于 `plannedEventCount`；
+- 每行的 `status` 为该事件的执行结果，`detail` 为失败 code 或补充说明（可为空）。
+
+### external-interactions.tsv
+
+表头逐字固定：
+
+    sequence	virtualOccurredAt	operation	ordinal	applicationId	outcome	sideEffectCertainty	externalOrderId	scriptId
+
+- `operation`：`CREATE` / `QUERY`；
+- `outcome`：场景脚本声明的结果；
+- `sideEffectCertainty`：副作用确定性；
+- `externalOrderId`：无外部订单时为 `-`；
+- `scriptId`：命中的脚本编号；未命中时记录到 `oracle-results.tsv` 的 `ORC-SYS-001` 失败详情。
+
+### oracle-results.tsv
+
+表头逐字固定：
+
+    oracleId	ruleType	status	expected	actual	detail
+
+六条系统不变量固定存在：`ORC-SYS-001` 外部调用全部有脚本、`ORC-SYS-002` 同一申请最多一个有效外单、`ORC-SYS-003` Unknown 先对账、`ORC-SYS-004` 终态不倒退、`ORC-SYS-005` Evidence 不越级、`ORC-SYS-006` 零真实外部写；场景 `EXPECT` 追加在系统不变量之后。
+
+### manifest.sha256
+
+恰好 6 行，每行 `<64 位小写 hex>␠␠<纯文件名>`，文件名升序且精确等于：
+
+    event-timeline.tsv
+    external-interactions.tsv
+    oracle-results.tsv
+    run-summary.txt
+    scenario.scenario
+    scenario.sha256
+
+禁止绝对路径、`..`、子目录、空文件名；逐文件重算 SHA-256 必须与 manifest 相等。
+
+### 三方摘要一致
+
+`SHA-256(scenario.scenario)` 必须同时等于 `scenario.sha256` 中的值、`run-summary.txt` 的 `scenarioDigest=` 值。
+
+## Evidence 校验稳定错误码
+
+`EvidenceBundleValidator` 与 `EvidenceBundleWriter` 失败时输出 `RUN_INCONCLUSIVE <scenarioId> <code>`（退出码 3），或由 `compare` 输出 `REPLAY_INVALID_EVIDENCE A:<code>` / `B:<code>`（退出码 2）：
+
+| code | 含义 |
+|---|---|
+| EVIDENCE_DIR_EXISTS | 目标目录已存在 |
+| EVIDENCE_DIR_NOT_FOUND | 目录不存在 |
+| EVIDENCE_DIR_NOT_DIRECTORY | 目录不是普通目录（含软链接） |
+| EVIDENCE_FILE_SET | 直接子项不等于 7 个文件 |
+| EVIDENCE_FILE_NOT_REGULAR | 文件不是普通文件 / 软链接 / 读失败 |
+| EVIDENCE_MANIFEST_LINES | manifest 不是恰好 6 行 |
+| EVIDENCE_MANIFEST_FORMAT | manifest 行格式错或含非法文件名 |
+| EVIDENCE_MANIFEST_ORDER | manifest 文件名不是升序约定集合 |
+| EVIDENCE_MANIFEST_MISMATCH | 重算摘要与 manifest 不一致 |
+| EVIDENCE_SUMMARY_LINES | run-summary 不是恰好 21 行 |
+| EVIDENCE_SUMMARY_FIELDS | 字段名 / 顺序 / 取值格式错 |
+| EVIDENCE_SUMMARY_ARITHMETIC | 计数算术不成立 |
+| EVIDENCE_TIMELINE_HEADER | event-timeline 表头不固定 |
+| EVIDENCE_TIMELINE_ROWS | 行数与 plannedEventCount 不符 |
+| EVIDENCE_SCENARIO_DIGEST_FORMAT | scenario.sha256 格式错 |
+| EVIDENCE_DIGEST_MISMATCH | 三方摘要不一致 |
+
+## 回放比较规则（`compare`）
+
+1. 先校验 A → 非法输出 `REPLAY_INVALID_EVIDENCE A:<code>`，退出码 2；
+2. 再校验 B → `REPLAY_INVALID_EVIDENCE B:<code>`，退出码 2；
+3. 比较 `scenarioDigest`，不同不得 MATCH；
+4. 逐字节比较 `scenario.scenario`、`run-summary.txt`、`event-timeline.tsv`、`external-interactions.tsv`、`oracle-results.tsv`，首个不同输出 `REPLAY_DIFFERENT <file>`，退出码 1；
+5. 全部相同输出 `REPLAY_MATCH <scenarioId> version=<n>`，退出码 0。
 
 ## 兼容性和版本升级规则
 
@@ -126,3 +256,4 @@ ACCEPTED 和 TIMEOUT_BUT_CREATED 必须提供 externalOrderId；其余使用 `-`
 - version 变更 → 语义变化时增加
 - 已执行场景不得覆盖原文件
 - 兼容性检查以 digest 为准
+- `schemaVersion` 变更 → 旧证据包不再通过新校验器（本项目不跟踪旧证据包；交付包一律用新 writer 重新生成）

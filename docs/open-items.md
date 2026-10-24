@@ -2,15 +2,15 @@
 
 | 文档属性 | 内容 |
 |---|---|
-| 版本 | V0.1 |
-| 日期 | 2026-09-21 |
+| 版本 | V0.2 |
+| 日期 | 2026-10-24 |
 | 类型 | 练习项目开放项清单 |
 | 对应正式文档 | IDS v0.1 MVP 第 13 节、IDS 产品定义 第 11 节 |
-| 状态 | DRAFT |
+| 状态 | FROZEN |
 
 ## 文档说明
 
-本文件把正式 IDS 文档里的 TO_VERIFY 项和开放项整理成一张表，便于后续逐项处理。
+本文件列出仍然未确认、未验证、未执行的项目，标注影响范围和处置方向。已由实现关闭的练习项已删除（见变更记录）。
 
 **它做什么：**
 
@@ -20,7 +20,7 @@
 
 **它不做什么：**
 
-- 不关闭任何 Open Item
+- 不关闭任何正式 Open Item
 - 不代替正式开放项登记表
 - 不把 TO_VERIFY 当作 FAIL
 
@@ -38,7 +38,6 @@
 | TO_VERIFY | 尚未验证 |
 | TO_CONFIRM | 尚未确认 |
 | NOT_EXECUTED | 尚未执行 |
-| INTERIM_REPORTED | 有中间报告但原始证据未闭合 |
 | BLOCKED | 被前置条件阻断 |
 
 ## 一、环境与合同类
@@ -72,10 +71,10 @@
 
 | ID | 项目 | 状态 | 影响 | 处置方向 |
 |---|---|---|---|---|
-| OI-TOOL-001 | exact JDK 版本 | TO_CONFIRM | 影响可重复构建 | 冻结工具链 |
+| OI-TOOL-001 | exact JDK 版本 | TO_CONFIRM | 影响可重复构建 | 冻结工具链（练习已钉 JDK 21） |
 | OI-TOOL-002 | exact 数据库产品与版本 | TO_CONFIRM | 影响 Migration | 环境基线确定 |
 | OI-TOOL-003 | exact 部署拓扑 | TO_CONFIRM | 影响 CAP-17 | 环境设计 |
-| OI-TOOL-004 | exact Secret 管理方式 | TO_CONFIRM | 影响 CAP-15 | 安全方案 |
+| OI-TOOL-004 | exact 凭据管理方式 | TO_CONFIRM | 影响 CAP-15 | 安全方案 |
 
 ## 四、容量与可靠性
 
@@ -97,15 +96,14 @@
 | OI-VER-004 | Canary 执行 | NOT_EXECUTED | 阻断 Site | 责任主体授权 |
 | OI-VER-005 | Site Acceptance | NOT_EXECUTED | 阻断发布 | 现场执行 |
 | OI-VER-006 | Capacity 测试 | NOT_EXECUTED | 阻断 C50 资格 | Lab 环境准备 |
-| OI-VER-007 | Replay 骨架 | NOT_EXECUTED | 不阻断 v0.1 | 后续实现 |
-| OI-VER-008 | Evidence Bundle 模板 | DRAFT | 不阻断 v0.1 | 本仓库 docs/ 已初稿 |
+| OI-VER-007 | 跨进程 / 真实环境回放 | TO_VERIFY | 不阻断 v0.1 | 单进程证据回放已实现（`REPLAY_EVIDENCE_R1_CASES_PASSED=12`）；跨进程与真实环境回放未执行 |
+| OI-VER-009 | 证据 schema 21 字段的来源 | TO_CONFIRM | 影响证据格式冻结 | 任务书 3.8 原文未落地，字段集由本仓库固定并写入 `docs/simulation-format.md`（验收簿 D-9）；原文到位后按其顺序/命名对齐 |
 
 ## 六、练习项目特有的开放项
 
 | ID | 项目 | 状态 | 说明 |
 |---|---|---|---|
-| OI-PRAC-001 | Inbox 部分 | NOT_EXECUTED | 练习里没有 callback，未实现 |
-| OI-PRAC-002 | 真实数据库 Migration | NOT_EXECUTED | 练习只用文本文件 |
+| OI-PRAC-002 | 生产数据库 Migration | NOT_EXECUTED | 练习只做本地 SQLite 单事务迁移；生产库迁移未执行 |
 | OI-PRAC-003 | 时间字段 | NOT_EXECUTED | 正式项目需要 created_at / updated_at |
 | OI-PRAC-004 | 多 Site 字段 | NOT_EXECUTED | 正式项目需要 customerId / siteId |
 | OI-PRAC-005 | 外键与级联规则 | NOT_EXECUTED | 正式项目需要定义 |
@@ -127,10 +125,16 @@
 
 ### 练习特有，不影响正式项目
 
-    OI-PRAC-001 ~ OI-PRAC-006
+    OI-PRAC-002 ~ OI-PRAC-006
+    OI-VER-007、OI-VER-009
+
+### Part B 门禁
+
+`GATE-A=NOT_READY` 期间，Part B（`lab.simulation.resource.*`：资源域、资源运行时、6 个资源场景、6 项资源变异）不得开始。该阻断属于门禁，不登记为开放项，解除条件为独立复核给出 `GATE-A=PASS`。
 
 ## 变更记录
 
 | 版本 | 日期 | 说明 |
 |---|---|---|
 | V0.1 | 2026-09-21 | 初稿，从正式文档抽取开放项 |
+| V0.2 | 2026-10-24 | 删除已由实现关闭的练习项（Inbox、Replay 骨架、Evidence 模板草案）；`OI-VER-007` 改为跨进程/真实回放；新增 `OI-VER-009`（21 字段来源，D-9）；补充 Part B 门禁说明 |
