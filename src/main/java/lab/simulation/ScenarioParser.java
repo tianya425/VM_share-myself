@@ -5,6 +5,7 @@ import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.time.Instant;
@@ -36,6 +37,9 @@ import java.util.Set;
 public class ScenarioParser {
 
     private static final long MAX_FILE_BYTES = 1024L * 1024L;
+    private static final int SUPPORTED_VERSION = 1;
+
+    private static final Set<String> CALLBACK_EVENT_TYPES = Set.of("STARTED", "COMPLETED", "FAILED");
 
     private static final Set<String> CREATE_OUTCOMES = Set.of(
             "ACCEPTED",
@@ -51,9 +55,9 @@ public class ScenarioParser {
      * 解析并校验场景文件。
      */
     public static ScenarioPackage parse(Path file) {
-        // 1. 文件边界
-        if (!Files.exists(file) || !Files.isRegularFile(file)) {
-            throw new ScenarioValidationException("SCENARIO_FILE_NOT_FOUND", file.toString());
+        // 1. 文件边界（不跟随符号链接）
+        if (!Files.exists(file) || !Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) {
+            throw new ScenarioValidationException("SCENARIO_FILE_NOT_FOUND", displayName(file));
         }
         try {
             long size = Files.size(file);
@@ -61,7 +65,7 @@ public class ScenarioParser {
                 throw new ScenarioValidationException("SCENARIO_FILE_TOO_LARGE", String.valueOf(size));
             }
         } catch (IOException e) {
-            throw new ScenarioValidationException("SCENARIO_FILE_NOT_FOUND", file.toString());
+            throw new ScenarioValidationException("SCENARIO_FILE_NOT_FOUND", displayName(file));
         }
 
         // 2. 读取原始字节
@@ -69,7 +73,7 @@ public class ScenarioParser {
         try {
             raw = Files.readAllBytes(file);
         } catch (IOException e) {
-            throw new ScenarioValidationException("SCENARIO_FILE_NOT_FOUND", file.toString());
+            throw new ScenarioValidationException("SCENARIO_FILE_NOT_FOUND", displayName(file));
         }
 
         // 无 BOM、无 NUL
@@ -133,6 +137,10 @@ public class ScenarioParser {
         if (version < 1) {
             throw new ScenarioValidationException("SCENARIO_HEADER_MISSING", "version<1");
         }
+        if (version != SUPPORTED_VERSION) {
+            throw new ScenarioValidationException(
+                    "SCENARIO_UNSUPPORTED_VERSION", "version=" + version);
+        }
         idx++;
 
         // START_AT
@@ -182,6 +190,11 @@ public class ScenarioParser {
             String line = records.get(idx);
             String[] parts = line.split("[ \t]+");
             String head = parts[0];
+
+            // 头部记录必须在最前面且各出现一次：此处再出现一律视为头部错误
+            if (head.equals("SCENARIO") || head.equals("START_AT") || head.equals("SEED")) {
+                throw new ScenarioValidationException("SCENARIO_HEADER_MISSING", head);
+            }
 
             if (head.equals("END")) {
                 if (parts.length != 1) {
@@ -352,6 +365,14 @@ public class ScenarioParser {
         }
     }
 
+    /**
+     * 异常 detail 只放文件名，禁止泄露绝对路径。
+     */
+    private static String displayName(Path file) {
+        Path name = file.getFileName();
+        return name == null ? "" : name.toString();
+    }
+
     private static void checkActionArgs(ScenarioEvent.Action action, List<String> args) {
         int need = switch (action) {
             case POINT_ADD -> 2;
@@ -366,8 +387,16 @@ public class ScenarioParser {
         if (args.size() != need) {
             throw new ScenarioValidationException("SCENARIO_ARGUMENT_COUNT", action.name());
         }
+        if (action == ScenarioEvent.Action.APPLICATION_CALLBACK
+                && !CALLBACK_EVENT_TYPES.contains(args.get(1))) {
+            throw new ScenarioValidationException("SCENARIO_UNKNOWN_ACTION", args.get(1));
+        }
     }
 
+    /**
+     * EXPECT 的参数数量与 COUNT 取值在 parse 期校验：
+     * COUNT 必须是非负整数（且不超过 int 范围），禁止留到 Oracle 运行时 parseInt。
+     */
     private static void checkOracleArgs(OracleRule.RuleType type, List<String> args) {
         int need = switch (type) {
             case APPLICATION_STATE -> 2;
@@ -379,6 +408,24 @@ public class ScenarioParser {
         };
         if (args.size() != need) {
             throw new ScenarioValidationException("SCENARIO_ARGUMENT_COUNT", type.name());
+        }
+        switch (type) {
+            case CREATE_CALLS, QUERY_CALLS, VALID_EXTERNAL_ORDERS -> checkCount(type.name(), args.get(1));
+            default -> {
+                // 其余类型的第二个参数是状态名，不在 parse 期做集合校验
+            }
+        }
+    }
+
+    private static void checkCount(String detail, String value) {
+        long count;
+        try {
+            count = Long.parseLong(value);
+        } catch (NumberFormatException e) {
+            throw new ScenarioValidationException("SCENARIO_ARGUMENT_COUNT", detail);
+        }
+        if (count < 0 || count > Integer.MAX_VALUE) {
+            throw new ScenarioValidationException("SCENARIO_ARGUMENT_COUNT", detail);
         }
     }
 

@@ -109,6 +109,7 @@ ACCEPTED 和 TIMEOUT_BUT_CREATED 必须提供 externalOrderId；其余使用 `-`
 | SCENARIO_FILE_TOO_LARGE | 文件超过 1 MiB |
 | SCENARIO_ENCODING | 编码问题（BOM/NUL/非 UTF-8） |
 | SCENARIO_HEADER_MISSING | SCENARIO / START_AT / SEED 缺失或格式错 |
+| SCENARIO_UNSUPPORTED_VERSION | version 不是当前支持的 1 |
 | SCENARIO_END_MISSING | END 缺失或不是最后一条 |
 | SCENARIO_EVENT_ORDER | 时间倒退或同键重复 |
 | SCENARIO_DUPLICATE_EVENT | eventId / scriptId / oracleId 重复 |
