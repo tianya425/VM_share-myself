@@ -26,10 +26,12 @@ public final class VirtualResourceWorld {
         this.snapshot = snapshot;
     }
 
+    /** 空世界（无任何目标、资源与预约）。 */
     public static VirtualResourceWorld empty() {
         return new VirtualResourceWorld(ResourceWorldSnapshot.empty());
     }
 
+    /** 当前不可变快照。 */
     public ResourceWorldSnapshot snapshot() {
         return snapshot;
     }
@@ -215,6 +217,7 @@ public final class VirtualResourceWorld {
 
     // ---------- 查询 ----------
 
+    /** 按编号查找 Destination；不存在返回 null。 */
     public Destination findDestination(String destinationId) {
         for (Destination destination : snapshot.destinations()) {
             if (destination.destinationId().equals(destinationId)) {
@@ -224,6 +227,7 @@ public final class VirtualResourceWorld {
         return null;
     }
 
+    /** 按编号查找 ServicePoint；不存在返回 null。 */
     public ServicePoint findServicePoint(String servicePointId) {
         for (ServicePoint servicePoint : snapshot.servicePoints()) {
             if (servicePoint.servicePointId().equals(servicePointId)) {
@@ -233,6 +237,7 @@ public final class VirtualResourceWorld {
         return null;
     }
 
+    /** 按编号查找 VirtualResource；不存在返回 null。 */
     public VirtualResource findResource(String resourceId) {
         for (VirtualResource resource : snapshot.resources()) {
             if (resource.resourceId().equals(resourceId)) {
@@ -242,6 +247,7 @@ public final class VirtualResourceWorld {
         return null;
     }
 
+    /** 按申请编号查找 Reservation；不存在返回 null。 */
     public Reservation findReservation(String applicationId) {
         for (Reservation reservation : snapshot.reservations()) {
             if (reservation.applicationId().equals(applicationId)) {

@@ -3,10 +3,16 @@ package lab;
 import java.util.List;
 import java.util.Optional;
 
+/**
+ * 业务规则检查入口：逐条断言登记、状态机、Fake、Outbox、Inbox、Workflow 与迁移规则。
+ *
+ * <p>输出 {@code CHECKS_PASSED=<n>}；任一断言失败以非零退出。
+ */
 public class RegistryChecks {
 
     private static int passed = 0;
 
+    /** 运行全部业务检查。 */
     public static void main(String[] args) throws Exception {
         r01();
         r02();

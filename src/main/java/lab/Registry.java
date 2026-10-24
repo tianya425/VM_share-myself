@@ -16,6 +16,14 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+/**
+ * 业务聚合入口：点位、申请、Outbox、Inbox、Workflow 与资源世界的规则与查询。
+ *
+ * <p>写入口统一遵循「候选快照 → 单次 {@code storage.commitState} → 成功后发布内存」的提交合同：
+ * 提交失败时内存与已提交状态都保持原样。只读模式在写任何 SQL 之前就拒绝。
+ *
+ * <p>资源写入口（Part B）把资源世界变更与业务状态变更放进同一候选快照，一次提交。
+ */
 public class Registry {
 
     private static final String ID_PATTERN = "[A-Z][A-Z0-9_-]{0,31}";
@@ -64,6 +72,14 @@ public class Registry {
 
     // ---------- point ----------
 
+    /**
+     * 登记点位。
+     *
+     * @param pointId 点位编号
+     * @param name    点位名称（1—40 字符，不含空白）
+     * @return 登记后的点位
+     * @throws RegistryException 编号或名称非法、点位已存在
+     */
     public synchronized Point registerPoint(String pointId, String name) {
         checkWritable();
         checkId(pointId);
@@ -81,11 +97,13 @@ public class Registry {
         return point;
     }
 
+    /** 按编号查询点位。 */
     public Optional<Point> findPoint(String pointId) {
         checkId(pointId);
         return Optional.ofNullable(points.get(pointId));
     }
 
+    /** 列出全部点位（按编号升序）。 */
     public List<Point> listPoints() {
         List<Point> copy = new ArrayList<>(points.values());
         copy.sort((a, b) -> a.pointId().compareTo(b.pointId()));
@@ -94,6 +112,13 @@ public class Registry {
 
     // ---------- application ----------
 
+    /**
+     * 登记搬运申请。
+     *
+     * <p>同编号同起终点 → 幂等重放；同编号不同起终点 → {@code APPLICATION_CONFLICT}。
+     *
+     * @throws RegistryException 编号非法、点位不存在、起终点相同或编号冲突
+     */
     public synchronized RegistrationResult registerApplication(String applicationId,
                                                                 String fromPointId,
                                                                 String toPointId) {
@@ -128,11 +153,13 @@ public class Registry {
         return new RegistrationResult(app, false);
     }
 
+    /** 按编号查询申请。 */
     public Optional<TransferApplication> findApplication(String applicationId) {
         checkId(applicationId);
         return Optional.ofNullable(applications.get(applicationId));
     }
 
+    /** 列出全部申请（按编号升序）。 */
     public List<TransferApplication> listApplications() {
         List<TransferApplication> copy = new ArrayList<>(applications.values());
         copy.sort((a, b) -> a.applicationId().compareTo(b.applicationId()));
@@ -141,6 +168,11 @@ public class Registry {
 
     // ---------- state transitions ----------
 
+    /**
+     * 下发申请：先提交 PENDING 意图，再调用外部端口，按结果提交。
+     *
+     * @throws RegistryException 申请不存在、状态不是 CREATED 或外部拒绝
+     */
     public synchronized TransferApplication dispatchApplication(String applicationId) {
         checkWritable();
         checkId(applicationId);
@@ -174,6 +206,7 @@ public class Registry {
         };
     }
 
+    /** 对 UNKNOWN 申请做外部对账（仅 ACCEPTED 恢复为 DISPATCHED）。 */
     public synchronized TransferApplication queryApplication(String applicationId) {
         checkWritable();
         checkId(applicationId);
@@ -206,16 +239,19 @@ public class Registry {
         return applications.get(applicationId);
     }
 
+    /** 状态转换 DISPATCHED → EXECUTING。 */
     public synchronized TransferApplication executeApplication(String applicationId) {
         checkWritable();
         return transition(applicationId, ApplicationState.EXECUTING);
     }
 
+    /** 状态转换 EXECUTING → COMPLETED。 */
     public synchronized TransferApplication completeApplication(String applicationId) {
         checkWritable();
         return transition(applicationId, ApplicationState.COMPLETED);
     }
 
+    /** 状态转换：规则允许的非终态 → CANCELLED。 */
     public synchronized TransferApplication cancelApplication(String applicationId) {
         checkWritable();
         return transition(applicationId, ApplicationState.CANCELLED);
@@ -241,12 +277,18 @@ public class Registry {
 
     // ---------- outbox ----------
 
+    /** 列出全部 Outbox 记录（按编号升序）。 */
     public synchronized List<OutboxEntry> listOutbox() {
         List<OutboxEntry> copy = new ArrayList<>(outbox.values());
         copy.sort((a, b) -> a.entryId().compareTo(b.entryId()));
         return List.copyOf(copy);
     }
 
+    /**
+     * 处理待恢复的 Outbox：PENDING 与 UNCERTAIN 都先 query，不直接重发 create。
+     *
+     * @return 本次实际处理成功的条数
+     */
     public synchronized int processOutbox() {
         checkWritable();
         int processed = 0;
@@ -292,6 +334,7 @@ public class Registry {
     }
     // ---------- inbox ----------
 
+    /** 接收外部回调：写入 Inbox 去重记录，并按事件类型推进申请状态。 */
     public synchronized InboxEntry receiveCallback(String applicationId, String eventType) {
         checkWritable();
         checkId(applicationId);
@@ -333,6 +376,7 @@ public class Registry {
         return result;
     }
 
+    /** 列出全部 Inbox 记录（按编号升序）。 */
     public synchronized List<InboxEntry> listInbox() {
         List<InboxEntry> copy = new ArrayList<>(inbox.values());
         copy.sort((a, b) -> a.entryId().compareTo(b.entryId()));
@@ -358,6 +402,7 @@ public class Registry {
 
     private static final List<String> WORKFLOW_STEP_NAMES = List.of("DISPATCH", "EXECUTE", "COMPLETE");
 
+    /** 为申请启动固定 3 步工作流（DISPATCH / EXECUTE / COMPLETE）。 */
     public synchronized WorkflowInstance startWorkflow(String applicationId) {
         checkWritable();
         checkId(applicationId);
@@ -388,6 +433,10 @@ public class Registry {
         return workflows.get(applicationId);
     }
 
+    /**
+     * 推进一步：先在同一候选上执行业务动作，只有申请状态达到或越过该步目标
+     * 才把本步标记完成并前进；超时、拒绝、取消时步骤保持 PENDING、索引不动。
+     */
     public synchronized WorkflowInstance advanceWorkflow(String applicationId) {
         checkWritable();
         checkId(applicationId);
@@ -477,11 +526,13 @@ public class Registry {
         return workflows.get(applicationId);
     }
 
+    /** 按申请编号查询工作流。 */
     public synchronized Optional<WorkflowInstance> findWorkflow(String applicationId) {
         checkId(applicationId);
         return Optional.ofNullable(workflows.get(applicationId));
     }
 
+    /** 列出全部工作流（按申请编号升序）。 */
     public synchronized List<WorkflowInstance> listWorkflows() {
         List<WorkflowInstance> copy = new ArrayList<>(workflows.values());
         copy.sort((a, b) -> a.instanceId().compareTo(b.instanceId()));
@@ -490,6 +541,7 @@ public class Registry {
 
     // ---------- stats ----------
 
+    /** 生成统计快照。 */
     public synchronized Stats stats() {
         Map<String, Integer> appsByState = new HashMap<>();
         for (ApplicationState s : ApplicationState.values()) {
@@ -536,6 +588,7 @@ public class Registry {
     }
     // ---------- migration ----------
 
+    /** 当前 schema 版本号。 */
     public synchronized int migrationVersion() {
         if (storage instanceof SqliteStorage s) {
             return s.currentVersion();
@@ -543,12 +596,14 @@ public class Registry {
         return -1;
     }
 
+    /** 内置迁移列表。 */
     public synchronized List<Migration> migrationList() {
         return SqliteStorage.listMigrations();
     }
 
     // ---------- health ----------
 
+    /** 生成健康检查快照。 */
     public synchronized HealthReport health() {
         String storageStatus;
         int pointsCount;

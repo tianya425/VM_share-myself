@@ -3,12 +3,18 @@ package lab;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicInteger;
 
+/**
+ * 并发检查入口：多线程同时写同一 Registry，断言幂等与不重复登记。
+ *
+ * <p>输出 {@code CONCURRENCY_CHECKS_PASSED=<n>}；任一断言失败以非零退出。
+ */
 public class ConcurrencyChecks {
 
     private static final int THREADS = 10;
 
     private static int passed = 0;
 
+    /** 运行全部并发检查。 */
     public static void main(String[] args) throws Exception {
         r29();
         r30();

@@ -60,6 +60,7 @@ public class FileStorage implements Storage {
         this.resourcesFile = dataDir.resolve("resources.txt");
     }
 
+    /** 从数据目录读取整份状态；文件缺失按空集合处理。 */
     @Override
     public RegistryState loadState() {
         return new RegistryState(
@@ -71,6 +72,7 @@ public class FileStorage implements Storage {
                 readResourceWorld());
     }
 
+    /** 写入 {@code *.staging} 并 fsync 后 ATOMIC_MOVE 替换；失败保留旧快照、不留 staging。 */
     @Override
     public void commitState(RegistryState next) {
         List<Path> stagingFiles = new ArrayList<>();

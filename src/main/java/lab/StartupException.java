@@ -16,10 +16,12 @@ public class StartupException extends RuntimeException {
         this.detail = detail == null ? "" : detail;
     }
 
+    /** 稳定错误码（STARTUP_ARGUMENT / STARTUP_CONFLICT）。 */
     public String code() {
         return code;
     }
 
+    /** 出错的具体参数或冲突名（可能为空串）。 */
     public String detail() {
         return detail;
     }

@@ -14,6 +14,7 @@ public record ReplayResult(String status, String scenarioId, int version, String
     public static final String DIFFERENT = "REPLAY_DIFFERENT";
     public static final String INVALID = "REPLAY_INVALID_EVIDENCE";
 
+    /** 本次比较是否为 {@code REPLAY_MATCH}。 */
     public boolean isMatch() {
         return MATCH.equals(status);
     }

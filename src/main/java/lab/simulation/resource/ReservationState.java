@@ -13,6 +13,7 @@ public enum ReservationState {
     RELEASED,
     CANCELLED;
 
+    /** 是否为终态（RELEASED / CANCELLED）。 */
     public boolean isTerminal() {
         return this == RELEASED || this == CANCELLED;
     }

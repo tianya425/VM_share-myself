@@ -1,5 +1,8 @@
 package lab;
 
+/**
+ * 业务错误：稳定 code + 可选 detail，CLI 输出形如 {@code ERR <code> <detail>}。
+ */
 public class RegistryException extends RuntimeException {
 
     private final String code;
@@ -11,10 +14,12 @@ public class RegistryException extends RuntimeException {
         this.detail = detail == null ? "" : detail;
     }
 
+    /** 稳定错误码。 */
     public String code() {
         return code;
     }
 
+    /** 错误细节（可能为空串）。 */
     public String detail() {
         return detail;
     }

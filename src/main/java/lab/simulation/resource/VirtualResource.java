@@ -15,6 +15,7 @@ public record VirtualResource(
         this(resourceId, servicePointId, ResourceAvailability.ENABLED);
     }
 
+    /** 返回仅改可用性（ENABLED / DISABLED）的副本。 */
     public VirtualResource withAvailability(ResourceAvailability newAvailability) {
         return new VirtualResource(resourceId, servicePointId, newAvailability);
     }
