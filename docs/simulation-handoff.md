@@ -2,27 +2,28 @@
 
 | 文档属性 | 内容 |
 |---|---|
-| 版本 | V0.2 |
+| 版本 | V0.3 |
 | 日期 | 2026-10-24 |
 | 类型 | 仿真基础交付说明 |
 | 对应正式文档 | IDS 仿真、回放与验证架构说明书 |
-| 状态 | FINAL_CANDIDATE（PR3 交付候选，等待 PR 合并与独立 GATE-A 复核） |
+| 状态 | FINAL（五个 PR 全部合并；最终交付） |
 
 ## 绑定信息
 
 | 项 | 值 |
 |---|---|
-| 绑定 commit | `88bf021`（PR3 基线 main，双亲 `30bb272` + `ef76dba`） |
-| PR3 分支 | `r1-verification`（从 `88bf021` 创建） |
+| 绑定 commit | `c9416e2`（PR5/6 合并后的 main，双亲 `13d4e58` + `cf574c1`） |
+| 合并链 | `30bb272`（PR1）→ `88bf021`（PR2）→ `439209e`（PR3）→ `13d4e58`（PR4）→ `c9416e2`（PR5/6） |
 | 交付 ZIP 文件名 | `logistics-intake-practice-STU-SIM-01-R1-main.zip` |
 | ZIP 绑定值 | 字节数、条目数、SHA-256、source commit 见 ZIP 外的 `delivery-receipt.txt` |
+| 历史快照 | Part A 交付（V0.2）按 `439209e` 冻结；本 V0.3 为最终交付修订，最终以本表与 receipt 为准（验收簿 D-12） |
 | 证据等级 | `LOCAL_SIMULATION` |
 
 ## 交付清单
 
 ### 新增包
 
-- `lab.simulation`（26 个 Java 文件）
+- `lab.simulation`（38 个 Java 文件，其中 `lab.simulation.resource` 9 个）
 
 ### 类（26 个）
 
@@ -38,25 +39,32 @@ Evidence 与 Replay：`EvidenceBundleWriter`、`EvidenceBundleValidator`、`Evid
 
 入口：`SimulationMain`
 
-### 场景（6 个）
+资源领域（`lab.simulation.resource`）：`Destination`、`ServicePoint`、`VirtualResource`、`Reservation`、`ReservationState`、`ReservationDecision`、`ResourceAvailability`、`ResourceWorldSnapshot`、`VirtualResourceWorld`
 
-- `scenarios/sim-001-happy.scenario`
-- `scenarios/sim-002-timeout-created.scenario`
-- `scenarios/sim-003-timeout-not-created.scenario`
-- `scenarios/invalid/invalid-backward-time.scenario`
-- `scenarios/invalid/invalid-duplicate-event.scenario`
-- `scenarios/invalid/invalid-unscripted-call.scenario`
+资源运行时：`ResourceInvariantOracle`、`ResourceStep`、`RestartPair`
 
-### 测试（4 个）
+### 场景（17 个）
+
+基础：`scenarios/sim-001-happy.scenario`、`sim-002-timeout-created.scenario`、`sim-003-timeout-not-created.scenario`；`scenarios/invalid/invalid-backward-time.scenario`、`invalid-duplicate-event.scenario`、`invalid-unscripted-call.scenario`
+
+资源合法：`scenarios/resource/sim-101-single-hold-release.scenario` … `sim-106-restart-recovery.scenario`（6 个）
+
+资源非法：`scenarios/resource/invalid/sim-invalid-101..105`（5 个）
+
+### 测试（8 个）
 
 - `src/test/java/lab/ReliabilityCloseoutChecks.java`（14 个具名 case）
 - `src/test/java/lab/simulation/ScenarioParserChecks.java`（16 个具名 case）
 - `src/test/java/lab/simulation/SimulationRuntimeChecks.java`（18 个具名 case）
 - `src/test/java/lab/simulation/ReplayEvidenceChecks.java`（12 个具名 case）
+- `src/test/java/lab/simulation/resource/ResourceWorldChecks.java`（24 个具名 case）
+- `src/test/java/lab/simulation/resource/ResourceStorageChecks.java`（6 个具名 case）
+- `src/test/java/lab/simulation/resource/ResourceParserChecks.java`（7 个具名 case）
+- `src/test/java/lab/simulation/resource/ResourceScenarioChecks.java`（10 个具名 case）
 
 ### 脚本
 
-- `scripts/verify-simulation.sh`（28 步一键验证）
+- `scripts/verify-simulation.sh`（35 步一键验证）
 
 ### 文档
 
@@ -64,7 +72,8 @@ Evidence 与 Replay：`EvidenceBundleWriter`、`EvidenceBundleValidator`、`Evid
 - `docs/simulation-format.md`
 - `docs/simulation-handoff.md`
 - `docs/mutation-results.md`
-- `docs/delivery-verification.md`（追加 PR3 复验记录）
+- `docs/resource-mutation-results.md`
+- `docs/delivery-verification.md`（§7—§10 分阶段复验）
 
 ## 行为合同
 
@@ -111,7 +120,7 @@ Evidence 与 Replay：`EvidenceBundleWriter`、`EvidenceBundleValidator`、`Evid
 - `scenarioDigest` 相同后才逐文件比较
 - `REPLAY_MATCH` / `REPLAY_DIFFERENT <file>` / `REPLAY_INVALID_EVIDENCE`
 
-## 验收事实（2026-10-24 实测，`bash scripts/verify-simulation.sh`）
+## 验收事实（2026-10-24 实测，`bash scripts/verify-simulation.sh`，退出码 0）
 
 ```
 CHECKS_PASSED=279
@@ -119,13 +128,19 @@ CONCURRENCY_CHECKS_PASSED=8
 RELIABILITY_R1_CASES_PASSED=14
 SCENARIO_PARSER_CASES_PASSED=16
 SIMULATION_RUNTIME_CASES_PASSED=18
+RESOURCE_WORLD_CASES_PASSED=24
+RESOURCE_STORAGE_CASES_PASSED=6
+RESOURCE_PARSER_CASES_PASSED=7
+RESOURCE_SCENARIO_CASES_PASSED=10
 REPLAY_EVIDENCE_R1_CASES_PASSED=12
 originalCases=30（逐字节 diff）
 REPLAY_MATCH SIM-002 version=1
-SIMULATION_R1_VERIFICATION_PASS originalCases=30 validScenarios=3 invalidScenarios=3 replay=1 evidenceBundles=5 realExternalWrites=0
+REPLAY_MATCH SIM-101..106 version=1（6 对）
+BASE_EVIDENCE_BUNDLES=5 RESOURCE_EVIDENCE_BUNDLES=17 EVIDENCE_BUNDLES=22
+SIMULATION_RESOURCE_VERIFICATION_PASS originalCases=30 baseValidScenarios=3 baseInvalidScenarios=3 resourceValidScenarios=6 resourceInvalidScenarios=5 resourceReplay=6 realExternalWrites=0
 ```
 
-变异测试：MUT-01..05 五项均在 `mktemp -d` 临时副本中完成，每项都让对应测试以非零退出失败，记录见 `docs/mutation-results.md`。
+变异测试：MUT-01..05 见 `docs/mutation-results.md`，RES-MUT-01..06 见 `docs/resource-mutation-results.md`；11 项均在临时副本中完成，每项都让目标检查以非零退出失败。
 
 ## 已知技术债与当前限制
 
@@ -139,7 +154,7 @@ SIMULATION_R1_VERIFICATION_PASS originalCases=30 validScenarios=3 invalidScenari
 
 ## Part B / PR5—PR6 增量（2026-10-24）
 
-绑定：分支 `sim-02-resource-runtime`，基线 `13d4e58`（PR4 合并后的 main）。
+绑定：分支 `sim-02-resource-runtime`，基线 `13d4e58`（PR4 合并后的 main），合并 `c9416e2`。
 
 - 运行时：8 个资源 Action 分派；每次 `RESERVATION_REQUEST` 的 `ReservationDecision` 按 eventId 存入运行观察；`WORLD_RESTART` 保留同一 Storage / Clock / Fake，丢弃并重建 Registry 与 Target，记录重载前后规范摘要，不触发外部调用。
 - 资源 Oracle：`ORC-RES-SYS-001..006` 始终启用、真算；`ORC-RES-SYS-006` 输出 `restartPairs=<n>,mismatches=<m>`；8 个资源 EXPECT 检查器对 0 条 / 重复条目一律 FAIL。

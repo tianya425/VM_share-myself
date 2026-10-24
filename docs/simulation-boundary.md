@@ -2,7 +2,7 @@
 
 | 文档属性 | 内容 |
 |---|---|
-| 版本 | V0.5 |
+| 版本 | V0.6 |
 | 日期 | 2026-10-24 |
 | 状态 | FROZEN |
 | 证据等级 | LOCAL_SIMULATION |
@@ -10,9 +10,9 @@
 ## 前置 main commit
 
 - 仓库：`logistics-intake-practice`（GitHub 私有练习仓库；地址不写入文档，见 ZIP 外 `delivery-receipt.txt`）
-- 基线与交付起点：`main` = `88bf021`（PR2 合并提交，双亲 `30bb272` + `ef76dba`）
-- PR3 分支：`r1-verification`，从 `88bf021` 创建；PR3 合并后的最终 main commit 与复验输出记录在 `docs/delivery-verification.md` §8 与 PR3 评论
-- 交付 ZIP 与 SHA-256 记录在 ZIP 外的 `delivery-receipt.txt`
+- 最终 main：`c9416e2`（PR5/6 合并提交，双亲 `13d4e58` + `cf574c1`）；合并链 `30bb272` → `88bf021` → `439209e` → `13d4e58` → `c9416e2`
+- 最终交付 ZIP 与 SHA-256 记录在 ZIP 外的 `delivery-receipt.txt`；Part A 历史 ZIP 仍按 `439209e` 快照（见 receipt）
+- 分阶段复验记录：`docs/delivery-verification.md` §7—§10
 
 ## 基线环境
 
@@ -22,13 +22,14 @@
 - SQLite JDBC 驱动：`lib/sqlite-jdbc-3.46.1.3.jar`
 - jar SHA-256：`4a4832720a65eaf7f4d6fd7ede52087b994dc5633c076f9e994dc0c8b4b0b4fa`
 
-## 基线事实（2026-10-24 实测，main=88bf021）
+## 基线事实（2026-10-24 实测，main=c9416e2）
 
-- `src/main/java` Java 文件：57（`lab` 31 + `lab.simulation` 26）
-- `src/test/java` Java 文件：4
-- `cases/*.in`：30；`scenarios/*.scenario`：3；`scenarios/invalid/*.scenario`：3
+- `src/main/java` Java 文件：69（`lab` 31 + `lab.simulation` 38，其中 `lab.simulation.resource` 9）
+- `src/test/java` Java 文件：8
+- `cases/*.in`：30；`scenarios/`：17（3 基础合法 + 3 基础非法 + 6 资源合法 + 5 资源非法）
 - `CHECKS_PASSED=279`、`CONCURRENCY_CHECKS_PASSED=8`、`RELIABILITY_R1_CASES_PASSED=14`
 - `SCENARIO_PARSER_CASES_PASSED=16`、`SIMULATION_RUNTIME_CASES_PASSED=18`、`REPLAY_EVIDENCE_R1_CASES_PASSED=12`
+- `RESOURCE_WORLD_CASES_PASSED=24`、`RESOURCE_STORAGE_CASES_PASSED=6`、`RESOURCE_PARSER_CASES_PASSED=7`、`RESOURCE_SCENARIO_CASES_PASSED=10`
 - 30 个旧 case 逐字节 diff：`originalCases=30`
 
 ## 允许边界
@@ -37,6 +38,7 @@
 - 合成点位和合成申请
 - `MemoryStorage` / `FileStorage` / `SqliteStorage`
 - `ScriptedFakeRcsAdapter`（本地 Java 类，按脚本返回固定结果）
+- `lab.simulation.resource` 的本地虚拟世界（`VirtualResourceWorld`、`Reservation`、`ServicePoint`、`Destination`）
 - 仓库内 `scenarios` / `cases` / `build/runs` / `docs`
 
 ## 禁止边界
@@ -90,6 +92,7 @@
 - 未执行任何真实外部写
 - 未执行 Lab 综合验证、Shadow、Canary、Site Acceptance、容量测试
 - 资源运行时 / 资源场景只在本地仿真验证；未接入真实调度系统
+- 未做真实资源容量、真实队列优先级与真实重放验证
 
 ## 当前验证事实
 
