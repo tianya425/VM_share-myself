@@ -14,19 +14,21 @@ import java.nio.file.Path;
  *   <li>run &lt;scenarioFile&gt; &lt;evidenceDir&gt;     执行场景并写入证据</li>
  *   <li>compare &lt;dirA&gt; &lt;dirB&gt;                 比较两次运行</li>
  * </ul>
+ *
+ * <p>统一退出码：
+ * <ul>
+ *   <li>0 — validate 成功 / run 通过</li>
+ *   <li>1 — run 失败（事件 / Oracle / 未消费脚本）</li>
+ *   <li>2 — validate 非法或用法错误</li>
+ *   <li>3 — 证据无法发布或内部错误</li>
+ * </ul>
+ *
+ * <p>stdout 只放稳定结果，禁止输出堆栈。
  */
 public class SimulationMain {
+
     /**
      * 仿真入口。
-     *
-     * <p>支持三个子命令：
-     * <ul>
-     *   <li>validate &lt;scenarioFile&gt;</li>
-     *   <li>run &lt;scenarioFile&gt; &lt;evidenceDir&gt;</li>
-     *   <li>compare &lt;dirA&gt; &lt;dirB&gt;</li>
-     * </ul>
-     *
-     * <p>用法错误或场景解析失败时以退出码 2 结束。
      */
     public static void main(String[] args) {
         PrintWriter out = new PrintWriter(System.out, true, StandardCharsets.UTF_8);
@@ -37,9 +39,7 @@ public class SimulationMain {
             return;
         }
 
-        String command = args[0];
-
-        switch (command) {
+        switch (args[0]) {
             case "validate" -> {
                 if (args.length != 2) {
                     out.println("ERR SIMULATION_USAGE");
@@ -72,19 +72,20 @@ public class SimulationMain {
     }
 
     private static void validate(PrintWriter out, Path file) {
+        ScenarioPackage pkg;
         try {
-            ScenarioPackage pkg = ScenarioParser.parse(file);
-            out.println("SCENARIO_VALID "
-                    + pkg.scenarioId()
-                    + " version=" + pkg.version()
-                    + " events=" + pkg.events().size()
-                    + " externalScripts=" + pkg.externalScripts().size()
-                    + " oracles=" + pkg.oracles().size());
+            pkg = ScenarioParser.parse(file);
         } catch (ScenarioValidationException e) {
-            out.println("ERR " + e.code()
-                    + (e.detail().isEmpty() ? "" : " " + e.detail()));
+            out.println("ERR " + e.code() + (e.detail().isEmpty() ? "" : " " + e.detail()));
             System.exit(2);
+            return;
         }
+        out.println("SCENARIO_VALID "
+                + pkg.scenarioId()
+                + " version=" + pkg.version()
+                + " events=" + pkg.events().size()
+                + " externalScripts=" + pkg.externalScripts().size()
+                + " oracles=" + pkg.oracles().size());
     }
 
     private static void run(PrintWriter out, Path file, Path evidenceDir) {
@@ -92,36 +93,52 @@ public class SimulationMain {
         try {
             pkg = ScenarioParser.parse(file);
         } catch (ScenarioValidationException e) {
-            out.println("ERR " + e.code()
-                    + (e.detail().isEmpty() ? "" : " " + e.detail()));
+            out.println("ERR " + e.code() + (e.detail().isEmpty() ? "" : " " + e.detail()));
             System.exit(2);
             return;
         }
 
         SimulationRuntime runtime = new SimulationRuntime(pkg);
-        SimulationRunResult result = runtime.run();
-
-        // 写证据
+        SimulationRunResult result;
         try {
-            EvidenceBundleWriter writer = new EvidenceBundleWriter(
-                    file, pkg, result, runtime.timeline(), result.oracleResults());
-            writer.write(evidenceDir);
-        } catch (IOException e) {
-            out.println("ERR EVIDENCE_WRITE_FAILED " + e.getMessage());
-            System.exit(1);
+            result = runtime.run();
+        } catch (RuntimeException e) {
+            out.println("RUN_INCONCLUSIVE " + pkg.scenarioId() + " INTERNAL_ERROR");
+            System.exit(3);
             return;
         }
 
-        out.println("RUN_" + result.runStatus()
-                + " " + result.scenarioId()
-                + " version=" + result.version()
-                + " events=" + result.eventCount()
-                + " oraclePass=" + result.oraclePassCount()
-                + " oracleFail=" + result.oracleFailCount()
-                + " creates=" + result.createCallCount()
-                + " queries=" + result.queryCallCount()
-                + " externalOrders=" + result.validExternalOrderCount());
-        out.println("EVIDENCE_WRITTEN " + evidenceDir);
+        try {
+            new EvidenceBundleWriter(file, pkg, result, runtime.timeline(), result.oracleResults())
+                    .write(evidenceDir);
+        } catch (IOException e) {
+            out.println("RUN_INCONCLUSIVE " + result.scenarioId() + " EVIDENCE_WRITE_FAILED");
+            System.exit(3);
+            return;
+        }
+
+        if (SimulationRunResult.COMPLETED.equals(result.runStatus())) {
+            out.println("RUN_COMPLETED " + result.scenarioId()
+                    + " version=" + result.version()
+                    + " planned=" + result.plannedCount()
+                    + " pass=" + result.passCount()
+                    + " fail=" + result.failCount()
+                    + " skipped=" + result.skippedCount()
+                    + " oraclePass=" + result.oraclePassCount()
+                    + " oracleFail=" + result.oracleFailCount()
+                    + " creates=" + result.createCallCount()
+                    + " queries=" + result.queryCallCount()
+                    + " externalOrders=" + result.validExternalOrderCount());
+            out.println("EVIDENCE_WRITTEN " + evidenceDir);
+            System.exit(0);
+        } else if (SimulationRunResult.FAILED.equals(result.runStatus())) {
+            out.println("RUN_FAILED " + result.scenarioId() + " " + result.firstFailureCode());
+            out.println("EVIDENCE_WRITTEN " + evidenceDir);
+            System.exit(1);
+        } else {
+            out.println("RUN_INCONCLUSIVE " + result.scenarioId() + " " + result.firstFailureCode());
+            System.exit(3);
+        }
     }
 
     private static void compare(PrintWriter out, Path dirA, Path dirB) {

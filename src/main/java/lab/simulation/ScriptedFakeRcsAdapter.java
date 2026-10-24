@@ -11,8 +11,8 @@ import java.util.Map;
 /**
  * 按脚本返回结果的 RcsExecutionPort 实现。
  *
- * <p>每次调用根据 operation 和 ordinal 查找唯一脚本。
- * 找不到脚本时抛 UNSCRIPTED_EXTERNAL_CALL。
+ * <p>每次调用<b>先记录一次调用尝试</b>（{@link ExternalCallAttempt}，含 scripted=false），
+ * 再按脚本执行。找不到脚本时记录 UNSCRIPTED_EXTERNAL_CALL 尝试后抛出稳定错误。
  *
  * <p>内部维护：
  * <ul>
@@ -25,35 +25,37 @@ public class ScriptedFakeRcsAdapter implements RcsExecutionPort {
 
     private final VirtualClock clock;
     private final List<ExternalScript> scripts;
+    private final RunFactLog facts;
     private final Map<ExternalScript.Operation, Integer> callCounts = new HashMap<>();
     private final Map<String, String> createdOrders = new HashMap<>();
     private final List<ExternalInteraction> interactions = new ArrayList<>();
     private int interactionSequence = 0;
 
-    public ScriptedFakeRcsAdapter(VirtualClock clock, List<ExternalScript> scripts) {
+    public ScriptedFakeRcsAdapter(VirtualClock clock, List<ExternalScript> scripts, RunFactLog facts) {
         this.clock = clock;
         this.scripts = List.copyOf(scripts);
+        this.facts = facts;
         for (ExternalScript.Operation op : ExternalScript.Operation.values()) {
             callCounts.put(op, 0);
         }
     }
+
     /**
      * 按 CREATE 调用序查找脚本并返回结果。
      *
-     * <p>副作用：
-     * <ul>
-     *   <li>ACCEPTED 和 TIMEOUT_BUT_CREATED 会把 externalOrderId 记录到 createdOrders</li>
-     *   <li>每次调用追加一条 ExternalInteraction</li>
-     *   <li>callCounts[CREATE] 自增</li>
-     * </ul>
+     * <p>副作用（按顺序）：
+     * <ol>
+     *   <li>记录一次调用尝试（未脚本化时 scripted=false）</li>
+     *   <li>ACCEPTED 和 TIMEOUT_BUT_CREATED 把 externalOrderId 记录到 createdOrders</li>
+     *   <li>追加一条 ExternalInteraction</li>
+     * </ol>
      *
      * @param applicationId 申请编号
      * @param fromPointId   起点编号（本方法不使用，仅保留接口签名）
      * @param toPointId     终点编号（本方法不使用，仅保留接口签名）
      * @return 规范化结果：ACCEPTED / REJECTED / TIMEOUT
-     * @throws ScenarioValidationException 找不到脚本或 outcome 不合法时
+     * @throws ScenarioValidationException 找不到脚本时（code=UNSCRIPTED_EXTERNAL_CALL）
      */
-
     @Override
     public synchronized ExternalOrderResult createOrder(String applicationId,
                                                        String fromPointId,
@@ -61,34 +63,28 @@ public class ScriptedFakeRcsAdapter implements RcsExecutionPort {
         int ordinal = nextOrdinal(ExternalScript.Operation.CREATE);
         ExternalScript script = findScript(ExternalScript.Operation.CREATE, ordinal);
         if (script == null) {
+            recordAttempt(ExternalScript.Operation.CREATE, ordinal, applicationId,
+                    false, "", ExternalCallAttempt.UNSCRIPTED, "-");
             throw new ScenarioValidationException(
                     "UNSCRIPTED_EXTERNAL_CALL",
                     "CREATE ordinal=" + ordinal + " app=" + applicationId);
         }
+        recordAttempt(ExternalScript.Operation.CREATE, ordinal, applicationId,
+                true, script.scriptId(), script.outcome(), script.externalOrderId());
 
         String outcome = script.outcome();
         String externalOrderId = script.externalOrderId();
         String certainty;
 
         switch (outcome) {
-            case "ACCEPTED" -> {
+            case "ACCEPTED", "TIMEOUT_BUT_CREATED" -> {
                 createdOrders.put(applicationId, externalOrderId);
                 certainty = ExternalInteraction.CONFIRMED_CREATED;
             }
-            case "TIMEOUT_BUT_CREATED" -> {
-                createdOrders.put(applicationId, externalOrderId);
-                certainty = ExternalInteraction.CONFIRMED_CREATED;
-            }
-            case "TIMEOUT_NOT_CREATED" -> {
-                certainty = ExternalInteraction.CONFIRMED_NOT_CREATED;
-            }
-            case "REJECTED" -> {
-                certainty = ExternalInteraction.REJECTED_NO_EFFECT;
-            }
-            default -> {
-                throw new ScenarioValidationException(
-                        "UNSCRIPTED_EXTERNAL_CALL", "unexpected outcome=" + outcome);
-            }
+            case "TIMEOUT_NOT_CREATED" -> certainty = ExternalInteraction.CONFIRMED_NOT_CREATED;
+            case "REJECTED" -> certainty = ExternalInteraction.REJECTED_NO_EFFECT;
+            default -> throw new ScenarioValidationException(
+                    "UNSCRIPTED_EXTERNAL_CALL", "unexpected outcome=" + outcome);
         }
 
         recordInteraction(ExternalScript.Operation.CREATE, ordinal, applicationId,
@@ -102,14 +98,15 @@ public class ScriptedFakeRcsAdapter implements RcsExecutionPort {
                     "UNSCRIPTED_EXTERNAL_CALL", "unexpected outcome=" + outcome);
         };
     }
+
     /**
      * 按 QUERY 调用序查找脚本并返回结果。
      *
-     * <p>副作用：
-     * <ul>
-     *   <li>每次调用追加一条 ExternalInteraction</li>
-     *   <li>callCounts[QUERY] 自增</li>
-     * </ul>
+     * <p>副作用（按顺序）：
+     * <ol>
+     *   <li>记录一次调用尝试（未脚本化时 scripted=false）</li>
+     *   <li>追加一条 ExternalInteraction</li>
+     * </ol>
      *
      * <p>若脚本 outcome 为 ACCEPTED，会校验 createdOrders 中是否已有
      * 同一个 applicationId → externalOrderId 的记录；不匹配时抛异常。
@@ -123,10 +120,14 @@ public class ScriptedFakeRcsAdapter implements RcsExecutionPort {
         int ordinal = nextOrdinal(ExternalScript.Operation.QUERY);
         ExternalScript script = findScript(ExternalScript.Operation.QUERY, ordinal);
         if (script == null) {
+            recordAttempt(ExternalScript.Operation.QUERY, ordinal, applicationId,
+                    false, "", ExternalCallAttempt.UNSCRIPTED, "-");
             throw new ScenarioValidationException(
                     "UNSCRIPTED_EXTERNAL_CALL",
                     "QUERY ordinal=" + ordinal + " app=" + applicationId);
         }
+        recordAttempt(ExternalScript.Operation.QUERY, ordinal, applicationId,
+                true, script.scriptId(), script.outcome(), script.externalOrderId());
 
         String outcome = script.outcome();
         String externalOrderId = script.externalOrderId();
@@ -201,6 +202,14 @@ public class ScriptedFakeRcsAdapter implements RcsExecutionPort {
             }
         }
         return null;
+    }
+
+    private void recordAttempt(ExternalScript.Operation op, int ordinal, String applicationId,
+                               boolean scripted, String scriptId, String outcome,
+                               String externalOrderId) {
+        facts.recordAttempt(new ExternalCallAttempt(
+                facts.nextSequence(), clock.now(), op, ordinal, applicationId,
+                scripted, scriptId, outcome, externalOrderId));
     }
 
     private void recordInteraction(ExternalScript.Operation op, int ordinal,
