@@ -1,6 +1,6 @@
 # logistics-intake-practice
 
-独立 Java 练习项目：在内存、文件或 SQLite 中登记点位、搬运申请、Outbox、Inbox 与 Workflow，支持状态机、并发保护、Fake 外部执行系统、统计与健康检查，并用固定 `.scenario` 文件做确定性仿真、不变量检查、证据与回放。
+独立 Java 练习项目：在内存、文件或 SQLite 中登记点位、搬运申请、Outbox、Inbox、Workflow 与资源预约，支持状态机、并发保护、Fake 外部执行系统、统计与健康检查，并用固定 `.scenario` 文件做确定性仿真、不变量检查、证据与回放。
 
 **边界**：本项目只做本地仿真（`LOCAL_SIMULATION`），不连接真实系统，零真实外部写（`realExternalWrites=0`）。不证明真实 M4、Lab、容量或生产资格。
 
@@ -67,7 +67,23 @@
 - Oracle：`InvariantOracle`、`OracleContext`、`OracleResult`
 - 证据与回放：`EvidenceBundleWriter`、`EvidenceBundleValidator`、`EvidenceValidationException`、`ReplayComparator`、`ReplayResult`
 - 入口：`SimulationMain`
-- 测试：`src/test/java/lab/ReliabilityCloseoutChecks.java`、`src/test/java/lab/simulation/ScenarioParserChecks.java`、`src/test/java/lab/simulation/SimulationRuntimeChecks.java`、`src/test/java/lab/simulation/ReplayEvidenceChecks.java`
+- 资源运行时：`ResourceInvariantOracle`、`ResourceStep`、`RestartPair`
+
+### 资源领域（`lab.simulation.resource`）
+
+- 目标与资源：`Destination`、`ServicePoint`、`VirtualResource`、`ResourceAvailability`
+- 预约：`Reservation`、`ReservationState`、`ReservationDecision`、`VirtualResourceWorld`、`ResourceWorldSnapshot`
+
+### 测试（8 个检查类）
+
+- `src/test/java/lab/ReliabilityCloseoutChecks.java`（14 个具名 case）
+- `src/test/java/lab/simulation/ScenarioParserChecks.java`（16 个具名 case）
+- `src/test/java/lab/simulation/SimulationRuntimeChecks.java`（18 个具名 case）
+- `src/test/java/lab/simulation/ReplayEvidenceChecks.java`（12 个具名 case）
+- `src/test/java/lab/simulation/resource/ResourceWorldChecks.java`（24 个具名 case）
+- `src/test/java/lab/simulation/resource/ResourceStorageChecks.java`（6 个具名 case）
+- `src/test/java/lab/simulation/resource/ResourceParserChecks.java`（7 个具名 case）
+- `src/test/java/lab/simulation/resource/ResourceScenarioChecks.java`（10 个具名 case）
 
 ## 编译
 
@@ -257,6 +273,11 @@
 | 任意 | `ERR SIMULATION_USAGE`（用法错误） | 2 |
 
 验证脚本本身：全部通过退出 0，任一步失败非零退出。
+
+### 资源动作（8 个）
+
+`DESTINATION_ADD`、`SERVICE_POINT_ADD`、`VIRTUAL_RESOURCE_ADD`、`RESOURCE_SET`、
+`RESERVATION_REQUEST`、`RESERVATION_RELEASE`、`RESERVATION_CANCEL`、`WORLD_RESTART`
 
 ### 场景
 
