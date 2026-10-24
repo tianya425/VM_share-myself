@@ -21,14 +21,14 @@
 | 本仓库基线提交 | `bdb30ea`（分支 `stu-sim-01-baseline`，标签 `baseline-r0`） |
 | 操作系统 | Ubuntu 24.04.4 LTS（`Linux 6.8.0-147-generic`） |
 | Java | `openjdk 21.0.12.1` / `javac 21.0.12.1` |
-| 工作目录 | `/home/tianya/logistics-intake-practice-STU-SIM-01` |
+| 工作目录 | 虚拟机内的项目根目录（复验时按仓库根相对路径执行，不写绝对路径） |
 
 > 源码包内不含 `.git`，因此"ZIP comment commit"与本地 `git init` 后的 `bdb30ea` 是同一个源码状态的两种标识；两者都不含任何修改。
 
 ## 2. 构建方式（可复现）
 
 ```bash
-cd /home/tianya/logistics-intake-practice-STU-SIM-01
+cd <项目根目录>
 export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
 export PATH="$JAVA_HOME/bin:$PATH"
 
@@ -271,7 +271,7 @@ R1-REL-01 / 02 / 11 / 12 / 13 / 14 六项的字面要求在基线 `bdb30ea` 上*
 ### 7.1 复跑方式与实测结果
 
 ```bash
-cd /home/tianya/logistics-intake-practice-STU-SIM-01
+cd <项目根目录>
 export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
 export PATH="$JAVA_HOME/bin:$PATH"
 rm -rf out/main out/test && mkdir -p out/main out/test build
@@ -639,3 +639,170 @@ RELIABILITY_R1_CASES_PASSED=13
 ```
 
 **结论**：该子断言确实钉住"追平"语义，不是恒真装饰；临时副本已删除，工作区未污染。
+
+---
+
+## 八、PR3 验收、变异与交付记录（2026-10-24）
+
+### 8.1 基线身份
+
+| 项 | 值 |
+|---|---|
+| 基线 `main` | `88bf021`（PR2 合并提交，双亲 `30bb272` + `ef76dba`） |
+| PR3 分支 | `r1-verification`，从 `88bf021` 创建 |
+| 交付提交 | 本分支末次提交；head commit 与 ZIP SHA-256 记录在 ZIP 外 `delivery-receipt.txt` |
+| JDK | 21.0.12.1（`--release 21 -encoding UTF-8`，class `major version: 65`） |
+
+### 8.2 改动范围
+
+| 文件 | 改动 |
+|---|---|
+| `scripts/verify-simulation.sh` | 重写为 28 步；非法场景 2 → 3（补 `invalid-unscripted-call`）；终点 `evidenceBundles=5` |
+| `README.md` | Java 21、`out/main` + `out/test`、唯一验证命令、CLI 退出码、禁止范围 |
+| `docs/simulation-format.md` | `schemaVersion=2`、21 字段逐字表、Evidence 七文件与列格式、Parser/Evidence 稳定错误码 |
+| `docs/simulation-boundary.md` | `LOCAL_SIMULATION`、零真实外部写、M4 不适用、绑定 commit |
+| `docs/simulation-handoff.md` | 状态 `FINAL_CANDIDATE`、绑定 commit 与 ZIP 名、三项 `=NONE/0` |
+| `docs/summary.md` | 删阶段号与估算覆盖率；实测计数；PR 状态 |
+| `docs/traceability.md` | Workflow / Inbox / SQLite / 只读 / 仿真与回放逐条更新 |
+| `docs/open-items.md` | 删过期练习项；保留真实未决；新增 `OI-VER-009`（21 字段来源） |
+| `docs/evidence-template.md` | 指向 `docs/simulation-format.md` 的机器可读证据格式 |
+| `docs/mutation-results.md` | 新增 MUT-01..05 记录（固定键） |
+| `docs/delivery-verification.md` | 本节；3 处绝对路径改为 `<项目根目录>` |
+
+**未改**：`src/**`、`cases/**`、`scenarios/**`。变异测试只在 `mktemp -d` 副本内做，正式分支一行未改坏。
+
+### 8.3 28 步结构
+
+1. 仓库根自检；2. JDK 21 自检；3. 定向清理四个目录；4. 源文件清单（`LC_ALL=C sort`）；5. 编译 main；6. 编译 test + major 65；7. `CHECKS_PASSED=279`；8. `CONCURRENCY_CHECKS_PASSED=8`；9. `RELIABILITY_R1_CASES_PASSED=14`；10. 30 个旧 case 逐字节 diff；11. `SCENARIO_PARSER_CASES_PASSED=16`；12. `SIMULATION_RUNTIME_CASES_PASSED=18`；13. `REPLAY_EVIDENCE_R1_CASES_PASSED=12`；14. validate 3 个合法场景；15. validate 2 个 parse 非法场景；16. run 非法场景（退出 1 + `ORC-SYS-001=FAIL`）；17. run SIM-001；18. run SIM-002；19. run SIM-003；20. 二次 run SIM-002；21. compare → `REPLAY_MATCH`；22. 5 个证据包 `sha256sum -c`；23. 7 文件形状 + manifest 6 行；24. 21 字段顺序（并核对 `docs/simulation-format.md`）；25. Evidence 安全扫描；26. README/docs 安全扫描；27. 工作区干净 + 确定性扫描；28. 唯一终点。
+
+### 8.4 全量实测输出（退出码 0）
+
+```text
+[STEP 01/28] 仓库根自检
+ROOT_OK ROOT_KIND=GIT_CHECKOUT
+
+[STEP 02/28] JDK 21 自检
+JDK_OK java=21.0.12.1 javac=21.0.12.1
+
+[STEP 03/28] 定向清理四个目录（不宽泛删除）
+CLEAN_OK out build/runs build/case-runs build/test-temp
+
+[STEP 04/28] 生成源文件清单（LC_ALL=C sort）
+SOURCES_OK main=57 test=4
+
+[STEP 05/28] 编译 main → out/main
+COMPILE_MAIN_OK
+
+[STEP 06/28] 编译 test → out/test，并核对 class major version=65
+COMPILE_TEST_OK major_version=65
+
+[STEP 07/28] RegistryChecks → CHECKS_PASSED=279
+CHECKS_PASSED=279
+
+[STEP 08/28] ConcurrencyChecks → CONCURRENCY_CHECKS_PASSED=8
+CONCURRENCY_CHECKS_PASSED=8
+
+[STEP 09/28] ReliabilityCloseoutChecks → RELIABILITY_R1_CASES_PASSED=14
+RELIABILITY_R1_CASES_PASSED=14
+
+[STEP 10/28] 30 个旧 case 独立目录运行并逐字节 diff
+ORIGINAL_CASES_OK total=30 passed=30
+
+[STEP 11/28] ScenarioParserChecks → SCENARIO_PARSER_CASES_PASSED=16
+SCENARIO_PARSER_CASES_PASSED=16
+
+[STEP 12/28] SimulationRuntimeChecks → SIMULATION_RUNTIME_CASES_PASSED=18
+SIMULATION_RUNTIME_CASES_PASSED=18
+
+[STEP 13/28] ReplayEvidenceChecks → REPLAY_EVIDENCE_R1_CASES_PASSED=12
+REPLAY_EVIDENCE_R1_CASES_PASSED=12
+
+[STEP 14/28] validate 三个合法场景（exit 0）
+VALID_SCENARIOS=3
+
+[STEP 15/28] validate 两个 parse 非法场景（exit 2 + 稳定 code）
+ERR SCENARIO_EVENT_ORDER EVT-002
+ERR SCENARIO_DUPLICATE_EVENT EVT-001
+
+[STEP 16/28] run 非法场景 invalid-unscripted-call（exit 1 + ORC-SYS-001=FAIL）
+UNSCRIPTED_RUN_OK exit=1 ORC-SYS-001=FAIL
+
+[STEP 17/28] run SIM-001 → build/runs/sim-001-a
+RUN_COMPLETED SIM-001 version=1 planned=6 pass=6 fail=0 skipped=0 oraclePass=11 oracleFail=0 creates=1 queries=0 externalOrders=1
+EVIDENCE_WRITTEN build/runs/sim-001-a
+
+[STEP 18/28] run SIM-002 → build/runs/sim-002-a
+RUN_COMPLETED SIM-002 version=1 planned=5 pass=5 fail=0 skipped=0 oraclePass=12 oracleFail=0 creates=1 queries=1 externalOrders=1
+EVIDENCE_WRITTEN build/runs/sim-002-a
+
+[STEP 19/28] run SIM-003 → build/runs/sim-003-a
+RUN_COMPLETED SIM-003 version=1 planned=5 pass=5 fail=0 skipped=0 oraclePass=12 oracleFail=0 creates=1 queries=1 externalOrders=0
+EVIDENCE_WRITTEN build/runs/sim-003-a
+
+[STEP 20/28] 二次 run SIM-002 → build/runs/sim-002-b
+RUN_COMPLETED SIM-002 version=1 planned=5 pass=5 fail=0 skipped=0 oraclePass=12 oracleFail=0 creates=1 queries=1 externalOrders=1
+EVIDENCE_WRITTEN build/runs/sim-002-b
+
+[STEP 21/28] compare 两次 SIM-002 → REPLAY_MATCH
+REPLAY_MATCH SIM-002 version=1
+
+[STEP 22/28] 5 个证据包逐一 sha256sum -c manifest.sha256
+EVIDENCE_BUNDLES=5
+
+[STEP 23/28] 证据包形状：恰好 7 个文件 / manifest 恰好 6 行
+EVIDENCE_SHAPE_OK dirs=5
+
+[STEP 24/28] run-summary.txt 21 字段逐字顺序核对
+SUMMARY_FIELDS_OK count=21
+
+[STEP 25/28] Evidence 安全扫描（绝对路径 / 用户名 / 凭据 / 真实内网 IP / 越级声明）
+EVIDENCE_SCAN_OK
+
+[STEP 26/28] README 与 docs 安全扫描（绝对路径 / 用户名 / 凭据值 / 真实内网 IP / 越级声明）
+DOCS_SCAN_OK
+
+[STEP 27/28] 工作区干净 + 确定性扫描
+WORKSPACE_OK DETERMINISM_OK
+
+[STEP 28/28] 汇总并输出唯一终点
+SIMULATION_R1_VERIFICATION_PASS originalCases=30 validScenarios=3 invalidScenarios=3 replay=1 evidenceBundles=5 realExternalWrites=0
+```
+
+### 8.5 变异测试（MUT-01..05）
+
+| MUT | 临时改坏 | 期望失败 case | 实际退出码 | 实际失败行 |
+|---|---|---|---|---|
+| MUT-01 | 首错后继续执行 | RUN-15 | 1 | `RUN-15 FAIL: 状态序列=[EVENT_PASS, EVENT_PASS, EVENT_PASS, EVENT_FAIL, EVENT_PASS, EVENT_PASS, EVENT_PASS]` |
+| MUT-02 | FAILED 退出码改 0 | RPL-11 | 1 | `RPL-11 FAIL: CLI 退出码=0 输出=RUN_FAILED SIM-INVALID-03 UNSCRIPTED_EXTERNAL_CALL` |
+| MUT-03 | ORC-SYS-001 固定 PASS | RUN-13 | 1 | `RUN-13 FAIL: ORC-SYS-001=PASS` |
+| MUT-04 | manifest 允许少一行 | RPL-09 | 1 | `RPL-09 FAIL: 改场景并删 manifest 行：code=EVIDENCE_MANIFEST_ORDER，期望 EVIDENCE_MANIFEST_LINES` |
+| MUT-05 | transition 先发布后提交 | R1-REL-03 | 1 | `R1-REL-03 FAIL: executeApplication 保存失败后内存状态=EXECUTING 期望回到已提交快照=DISPATCHED` |
+
+固定键记录、临时副本删除确认与恢复后全量复验见 `docs/mutation-results.md`。
+
+### 8.6 文档冻结
+
+- **21 字段**：逐字写入 `docs/simulation-format.md`（表 1—21，顺序固定）；脚本第 24 步从文档表格提取字段并与代码 `SUMMARY_FIELDS` 逐项比对，顺序不同即失败（文档冻结检查引用该表）。
+- **README**：Java 21、`out/main` + `out/test`、唯一验证命令 `bash scripts/verify-simulation.sh`、CLI 退出码表、禁止范围。
+- **summary**：删除阶段编号与估算覆盖率条目，改为实测计数与 PR 状态。
+- **boundary**：`LOCAL_SIMULATION`、`realExternalWrites=0`、M4 不适用（`N/A`）、绑定 `88bf021`。
+- **handoff**：状态 `FINAL_CANDIDATE`、绑定 commit 与交付 ZIP 名、`FORMAL_REPOSITORY_CHANGE=NONE` / `REAL_M4_ACCESS=NONE` / `REAL_EXTERNAL_WRITE_COUNT=0`。
+- **traceability / open-items / evidence-template**：按已实现项与真实未决更新，无占位符。
+- **安全扫描口径**：Evidence 与 README/docs 不得出现绝对路径、仓库账号名、真实内网 IP、凭据值（以 token、password、secret 为键并紧跟取值，或 Bearer 后跟凭据）；越级声明词只允许出现在禁止清单或否定语境。`docs/security-baseline.md` 等安全文档里作为概念名出现的 Token / Secret 字样不视为凭据，扫描只拦凭据值。
+
+### 8.7 交付包
+
+- ZIP 文件名：`logistics-intake-practice-STU-SIM-01-R1-main.zip`，内容取自交付提交树（`git archive`）。
+- ZIP 内不含 `.git`、`out`、`build`、`*.class`、`*.db*`、日志、IDE 文件、凭据。
+- ZIP 外 `delivery-receipt.txt` 记录：ZIP 字节数、条目数、SHA-256、source commit。
+- 交付包复验方式：新目录解压 → `bash scripts/verify-simulation.sh` → 与 §8.4 逐字比对。
+
+### 8.8 三个 PR 记录
+
+| PR | head | merge commit | 状态 |
+|---|---|---|---|
+| #1（可靠性整改） | `6f6637f` | `30bb272` | Merged；合并后复验 `PR1_VERIFY=PASS` |
+| #2（场景/运行时/证据回放） | `ef76dba` | `88bf021` | Merged；合并后复验 `PR2_VERIFY=PASS` |
+| #3（验收/变异/交付） | 见 `delivery-receipt.txt` 的 source commit | — | 待合并；分支 `r1-verification` 已推送 |
+
+三个 PR 的完整 URL 与状态记录在 ZIP 外 `delivery-receipt.txt`（文档正文不写仓库账号名）。

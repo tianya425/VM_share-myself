@@ -2,27 +2,29 @@
 
 | 文档属性 | 内容 |
 |---|---|
-| 版本 | V0.1 |
-| 日期 | 2026-09-21 |
+| 版本 | V0.2 |
+| 日期 | 2026-10-24 |
 | 类型 | 练习项目证据模板 |
 | 对应正式文档 | IDS 仿真、回放与验证架构说明书 第 19 节、附录 C |
-| 状态 | DRAFT |
+| 状态 | FROZEN |
 
 ## 文档说明
 
-本文件是练习项目 `logistics-intake-practice` 的 Evidence Bundle 模板。
+本文件是练习项目 `logistics-intake-practice` 的人工填写版 Evidence Bundle 模板。
 
 **它做什么：**
 
-- 定义一次验证运行的证据记录格式
+- 定义一次验证运行的人工记录格式
 - 说明每份证据应包含哪些字段
-- 为练习的 cases/verification.md 提供正式化参考
+- 为练习的阶段复验记录提供参考
 
 **它不做什么：**
 
 - 不生成实际证据
 - 不替代正式 EvidenceProfile
 - 不声称练习证据等于 VERIFIED_LAB
+
+**机器可读证据包（仿真 `run`）不在本文件定义**：7 个文件、`run-summary.txt` 的 21 个固定字段、三个 TSV 的列格式与稳定错误码以 `docs/simulation-format.md` 为准；`scripts/verify-simulation.sh` 第 24 步逐字核对该 21 字段顺序。
 
 依据：
 
