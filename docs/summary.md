@@ -2,7 +2,7 @@
 
 | 文档属性 | 内容 |
 |---|---|
-| 版本 | V1.0 |
+| 版本 | V1.1 |
 | 日期 | 2026-10-24 |
 | 类型 | 练习项目总结 |
 | 状态 | FINAL |
@@ -27,7 +27,9 @@
 - 确定性仿真：场景解析、虚拟时间、运行时、六条系统不变量
 - 证据包（7 文件、21 字段、原子发布、逐文件摘要）
 - 回放比较（`REPLAY_MATCH` / `REPLAY_DIFFERENT` / `REPLAY_INVALID_EVIDENCE`）
-- 28 步一键验证脚本与 5 项变异测试
+- 资源仿真：8 个资源 Action、`ORC-RES-SYS-001..006` 六条资源不变量、8 个资源 EXPECT、6 个资源合法场景 + 5 个非法场景
+- 资源证据与回放：6 个资源场景各跑两次逐字节一致
+- 35 步一键验证脚本与 11 项变异测试（MUT-01..05 + RES-MUT-01..06）
 
 ## 三、PR 状态
 
@@ -35,18 +37,20 @@
 |---|---|---|---|---|
 | #1 | `r1-reliability` | 可靠性整改（R1-REL-01..14） | Merged | `30bb272` |
 | #2 | `r1-runtime` | 确定性场景、运行时、Oracle 与证据回放整改 | Merged | `88bf021` |
-| #3 | `r1-verification` | 验收脚本、变异测试、文档冻结与交付 | 待合并 | — |
+| #3 | `r1-verification` | 验收脚本、变异测试、文档冻结与交付 | Merged | `439209e` |
+| #4 | `sim-02-resource-domain` | 资源领域模型 + 24 项 RW 检查 + SQLite v3 迁移 | Merged | `13d4e58` |
+| #5 | `sim-02-resource-runtime` | 资源运行时 8 Action + 资源不变量/场景 + RSC-10 | Merged | `c9416e2` |
 
 基线之前的历史 PR（编号 #2—#21，2026-09）属于 `legacy/vm-share-68f5a25` 归档历史，与当前 `main`（从 `bdb30ea` 起）不同源，不再代表当前代码。
 
 ## 四、代码资产（实测计数）
 
-- `src/main/java`：57 个 Java 文件（`lab` 31 + `lab.simulation` 26）
-- `src/test/java`：4 个检查类，60 个具名 case（14 + 16 + 18 + 12）
+- `src/main/java`：69 个 Java 文件（`lab` 31 + `lab.simulation` 38，其中 `lab.simulation.resource` 9）
+- `src/test/java`：8 个检查类，107 个具名 case（14 + 16 + 18 + 12 + 24 + 6 + 7 + 10）
 - `lib/`：1 个 jar（`sqlite-jdbc-3.46.1.3.jar`）
 - `cases/`：30 个 `.in` 样例 + 31 个 `expected.txt`（94 个文件）
-- `scenarios/`：3 个合法场景 + 3 个非法场景
-- `docs/`：13 个文档
+- `scenarios/`：3 个基础合法场景 + 3 个基础非法场景 + 6 个资源合法场景 + 5 个资源非法场景（17 个）
+- `docs/`：14 个文档
 - `RegistryChecks`：279 项断言；`ConcurrencyChecks`：8 项
 
 ### 核心 Java 类
@@ -97,6 +101,8 @@ SQLite 模式：`data/logistics.db`
 | MVP-REQ-01 | 统一入口与请求证据 | 部分（幂等 + 并发 + 仿真证据） |
 | MVP-REQ-02 | 稳定身份与外部映射 | 部分（externalOrderId） |
 | MVP-REQ-03 | 任务状态和不变量 | 部分（六态状态机 + 6 条系统不变量） |
+| MVP-REQ-04 | 目的地解析 | 部分（Destination / ServicePoint 领域模型 + 场景动作，仅本地虚拟世界） |
+| MVP-REQ-05 | 资源预约 | 部分（单容量请求/释放/取消/队列/重启恢复，仅本地虚拟世界） |
 | MVP-REQ-09 | RCS Port 与 M4Adapter | 部分（Port + Fake + 脚本化 Fake） |
 | MVP-REQ-11 | 回调、查询和对账 | 部分（query + callback + Outbox 恢复） |
 | MVP-REQ-12 | 取消过程 | 部分（cancel 转换） |
@@ -131,8 +137,6 @@ SQLite 模式：`data/logistics.db`
 
 尚未接触的核心概念：
 
-- Destination / ServicePoint（MVP-REQ-04）
-- Resource Reservation（MVP-REQ-05）
 - Priority / Admission（MVP-REQ-06 / 07）
 - Vehicle Capability / Candidate（MVP-REQ-08）
 - SiteProfile / 配置版本（MVP-REQ-15）
@@ -150,6 +154,12 @@ SQLite 模式：`data/logistics.db`
 | `SIMULATION_RUNTIME_CASES_PASSED` | 18 | `lab.simulation.SimulationRuntimeChecks` |
 | `REPLAY_EVIDENCE_R1_CASES_PASSED` | 12 | `lab.simulation.ReplayEvidenceChecks` |
 | 旧 case 逐字节 diff | 30 / 30 | `scripts/verify-simulation.sh` |
+| `RESOURCE_WORLD_CASES_PASSED` | 24 | `lab.simulation.resource.ResourceWorldChecks` |
+| `RESOURCE_STORAGE_CASES_PASSED` | 6 | `lab.simulation.resource.ResourceStorageChecks` |
+| `RESOURCE_PARSER_CASES_PASSED` | 7 | `lab.simulation.resource.ResourceParserChecks` |
+| `RESOURCE_SCENARIO_CASES_PASSED` | 10 | `lab.simulation.resource.ResourceScenarioChecks` |
+| 资源场景双跑回放 | 6 / 6 `REPLAY_MATCH` | `scripts/verify-simulation.sh` |
+| 证据包 | 22（5 基础 + 17 资源） | `scripts/verify-simulation.sh` |
 | 真实外部写 | 0 | 每条证据 `realExternalWriteCount=0` |
 
 不写代码行覆盖率、文档覆盖率等未测量的估计值。
@@ -168,7 +178,8 @@ SQLite 模式：`data/logistics.db`
 - `docs/simulation-boundary.md` — 仿真边界
 - `docs/simulation-handoff.md` — 仿真交付说明
 - `docs/delivery-verification.md` — 分阶段复验记录
-- `docs/mutation-results.md` — 变异测试记录
+- `docs/mutation-results.md` — 基础变异测试记录（MUT-01..05）
+- `docs/resource-mutation-results.md` — 资源变异测试记录（RES-MUT-01..06）
 
 ## 九、结论
 
@@ -179,7 +190,7 @@ SQLite 模式：`data/logistics.db`
 - 用最小实现验证概念
 - 不连接任何真实系统，`realExternalWrites=0`
 - 通过 GitHub PR 提交，合并后复验
-- 不进入正式工程；Part B 资源领域模型已在 PR4 接线，资源运行时与资源场景未完成（PR5/PR6）
+- 不进入正式工程；Part B（PR4/PR5/PR6）只做本地单进程虚拟世界（容量固定 1、稳定队列键、虚拟时钟、脚本化 Fake），不代表真实 AGV / 线仓 / PLC / MES 的调度合同或容量结论
 
 ## 变更记录
 
@@ -193,3 +204,4 @@ SQLite 模式：`data/logistics.db`
 | V0.6 | 2026-10-04 | 增加仿真基础 |
 | V0.7 | 2026-10-04 | 仿真代码整洁化 |
 | V1.0 | 2026-10-24 | 删阶段号与估算覆盖率；按实测改写计数与 PR 状态（PR1/PR2 已合并，PR3 待合并） |
+| V1.1 | 2026-10-24 | 最终整合：PR3/PR4/PR5/6 均已合并（`439209e`/`13d4e58`/`c9416e2`）；计数改为 69 / 8 类 107 case / 14 文档 / 17 场景；补资源能力、资源量化与变异记录 |
