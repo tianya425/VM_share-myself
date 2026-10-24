@@ -16,14 +16,17 @@ public record Reservation(
         long offsetMillis,
         long logicalSequence) {
 
+    /** 预约编号规则：{@code "RSV-" + applicationId}。 */
     public static String idFor(String applicationId) {
         return "RSV-" + applicationId;
     }
 
+    /** 是否为终态（RELEASED / CANCELLED）。 */
     public boolean isTerminal() {
         return state.isTerminal();
     }
 
+    /** 返回仅改状态的副本。 */
     public Reservation withState(ReservationState newState) {
         return new Reservation(reservationId, applicationId, destinationId, servicePointId,
                 resourceId, newState, offsetMillis, logicalSequence);

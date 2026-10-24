@@ -30,10 +30,12 @@ public class ScenarioValidationException extends RuntimeException {
         this.detail = detail == null ? "" : detail;
     }
 
+    /** 稳定错误码（如 SCENARIO_EVENT_ORDER）。 */
     public String code() {
         return code;
     }
 
+    /** 错误细节（可能为空串）。 */
     public String detail() {
         return detail;
     }

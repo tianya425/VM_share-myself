@@ -177,10 +177,12 @@ public class SqliteStorage implements Storage, AutoCloseable {
         }
     }
 
+    /** 当前代码内置的迁移列表（按版本升序）。 */
     public static List<Migration> listMigrations() {
         return MIGRATIONS;
     }
 
+    /** 已应用的最高迁移版本；只读连接不建表，不存在时返回 0。 */
     public int currentVersion() {
         if (readOnly) {
             // 只读连接上不能建表：版本号只查询，schema_version 不存在视为 0
@@ -195,6 +197,7 @@ public class SqliteStorage implements Storage, AutoCloseable {
 
     // ---------- Storage ----------
 
+    /** 读取整份状态（五张业务表 + 四张资源表）。 */
     @Override
     public synchronized RegistryState loadState() {
         return new RegistryState(
@@ -241,6 +244,7 @@ public class SqliteStorage implements Storage, AutoCloseable {
         }
     }
 
+    /** 关闭数据库连接。 */
     @Override
     public synchronized void close() {
         try {
@@ -261,24 +265,28 @@ public class SqliteStorage implements Storage, AutoCloseable {
         Storage.super.savePoints(points);
     }
 
+    /** 兼容委托：只替换该集合后走一次整状态提交。 */
     @Override
     public void saveApplications(List<TransferApplication> applications) {
         checkWritable();
         Storage.super.saveApplications(applications);
     }
 
+    /** 兼容委托：只替换该集合后走一次整状态提交。 */
     @Override
     public void saveOutbox(List<OutboxEntry> outbox) {
         checkWritable();
         Storage.super.saveOutbox(outbox);
     }
 
+    /** 兼容委托：只替换该集合后走一次整状态提交。 */
     @Override
     public void saveInbox(List<InboxEntry> inbox) {
         checkWritable();
         Storage.super.saveInbox(inbox);
     }
 
+    /** 兼容委托：只替换该集合后走一次整状态提交。 */
     @Override
     public void saveWorkflows(List<WorkflowInstance> workflows) {
         checkWritable();

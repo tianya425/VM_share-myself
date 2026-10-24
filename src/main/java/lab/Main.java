@@ -8,7 +8,14 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
 
+/**
+ * 终端命令入口：按启动参数选择存储与 Fake 模式，逐行读取标准输入并输出稳定结果行。
+ *
+ * <p>退出码：参数错误 2；存储打不开 1；命令循环正常结束（EOF / exit）0。
+ * 存储资源用 try-with-resources 管理（SqliteStorage 必须 close）。
+ */
 public class Main {
+    /** 解析启动参数并进入命令循环。 */
     public static void main(String[] args) throws Exception {
         BufferedReader in = new BufferedReader(
                 new InputStreamReader(System.in, StandardCharsets.UTF_8));

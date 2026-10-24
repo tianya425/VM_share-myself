@@ -13,6 +13,7 @@ package lab.simulation;
  */
 public record RestartPair(String eventId, String beforeDigest, String afterDigest) {
 
+    /** 重载前后摘要是否一致（重载无损）。 */
     public boolean consistent() {
         return beforeDigest != null && beforeDigest.equals(afterDigest);
     }
