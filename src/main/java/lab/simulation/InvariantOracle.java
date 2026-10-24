@@ -2,43 +2,41 @@ package lab.simulation;
 
 import lab.ApplicationState;
 import lab.OutboxEntry;
+import lab.OutboxStatus;
 import lab.TransferApplication;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
- * 不变量检查器。
+ * 不变量检查器（只读）。
  *
  * <p>检查两类规则：
  * <ol>
- *   <li>系统不变量（ORC-SYS-*）——运行时始终启用，不能由场景关闭</li>
- *   <li>场景 EXPECT（自定义 oracleId）——由 ScenarioPackage.oracles 定义</li>
+ *   <li>六条系统不变量 ORC-SYS-001..006 —— 全部按 {@link OracleContext} 的事实真实计算，
+ *       任何一条都不能被场景关闭，也不允许硬编码 PASS</li>
+ *   <li>场景 EXPECT（自定义 oracleId）</li>
  * </ol>
  *
- * <p>本类只读取公开数据，不修改任何业务对象。
+ * <p>本类不引用 {@link SimulationRuntime}，不修改任何业务对象。
  */
 public class InvariantOracle {
 
-    private final ScenarioPackage scenario;
-    private final SimulationRuntime runtime;
+    private static final String EVIDENCE_LEVEL = "LOCAL_SIMULATION";
+    private static final String PORT_TYPE = "ScriptedFakeRcsAdapter";
 
-    public InvariantOracle(ScenarioPackage scenario, SimulationRuntime runtime) {
+    private final ScenarioPackage scenario;
+
+    public InvariantOracle(ScenarioPackage scenario) {
         this.scenario = scenario;
-        this.runtime = runtime;
     }
 
     /**
-     * 执行全部检查。
-     *
-     * <p>顺序：
-     * <ol>
-     *   <li>六条系统不变量</li>
-     *   <li>场景 EXPECT</li>
-     *   <li>按 oracleId 排序</li>
-     * </ol>
+     * 执行全部检查：六条系统不变量 + 场景 EXPECT，结果按 oracleId 排序。
      */
     public List<OracleResult> check(OracleContext ctx) {
         List<OracleResult> results = new ArrayList<>();
@@ -48,110 +46,158 @@ public class InvariantOracle {
         return List.copyOf(results);
     }
 
-    // ---------- 系统不变量 ----------
+    // ---------- 六条系统不变量 ----------
 
-    /**
-     * 六条系统不变量。任一条不可由场景关闭。
-     */
     private List<OracleResult> checkSystemInvariants(OracleContext ctx) {
         List<OracleResult> list = new ArrayList<>();
-
-        // ORC-SYS-001：外部调用全部有脚本
         list.add(checkScriptedExternalCalls(ctx));
-
-        // ORC-SYS-002：同一申请最多一个有效外单
-        list.add(checkNoDuplicateExternalOrder(ctx));
-
-        // ORC-SYS-003：Unknown 先对账，不盲目重发
+        list.add(checkSingleExternalOrder(ctx));
         list.add(checkUnknownQueryBeforeRetry(ctx));
-
-        // ORC-SYS-004：终态不倒退（本版本简化检查状态合法性）
         list.add(checkTerminalMonotonic(ctx));
-
-        // ORC-SYS-005：Evidence 不越级
-        list.add(OracleResult.pass(
-                "ORC-SYS-005", "EVIDENCE_LEVEL",
-                "LOCAL_SIMULATION", "LOCAL_SIMULATION"));
-
-        // ORC-SYS-006：零真实外部写
-        list.add(OracleResult.pass(
-                "ORC-SYS-006", "NO_REAL_EXTERNAL_WRITE", "0", "0"));
-
+        list.add(checkEvidenceLevel(ctx));
+        list.add(checkNoRealExternalWrite(ctx));
         return list;
     }
 
+    /**
+     * ORC-SYS-001：所有外部调用都必须有脚本。
+     */
     private OracleResult checkScriptedExternalCalls(OracleContext ctx) {
-        for (ExternalInteraction i : ctx.interactions()) {
-            if (i.scriptId() == null || i.scriptId().isEmpty()) {
-                return OracleResult.fail(
-                        "ORC-SYS-001", "SCRIPTED_EXTERNAL_CALLS",
-                        "true", "false", "interaction without scriptId");
+        for (ExternalCallAttempt attempt : ctx.externalCallAttempts()) {
+            if (!attempt.scripted()) {
+                return OracleResult.fail("ORC-SYS-001", "SCRIPTED_EXTERNAL_CALLS", "true", "false",
+                        "UNSCRIPTED " + attempt.operation()
+                                + " ordinal=" + attempt.ordinal()
+                                + " app=" + attempt.applicationId());
             }
         }
-        return OracleResult.pass(
-                "ORC-SYS-001", "SCRIPTED_EXTERNAL_CALLS", "true", "true");
+        return OracleResult.pass("ORC-SYS-001", "SCRIPTED_EXTERNAL_CALLS", "true", "true");
     }
 
-    private OracleResult checkNoDuplicateExternalOrder(OracleContext ctx) {
-        java.util.Map<String, String> externalByApp = new java.util.HashMap<>();
-        for (ExternalInteraction i : ctx.interactions()) {
-            if (i.sideEffectCertainty().equals(ExternalInteraction.CONFIRMED_CREATED)) {
-                String existing = externalByApp.put(i.applicationId(), i.externalOrderId());
-                if (existing != null && !existing.equals(i.externalOrderId())) {
-                    return OracleResult.fail(
-                            "ORC-SYS-002", "NO_DUPLICATE_EXTERNAL_ORDER",
-                            "unique", "duplicate", "app=" + i.applicationId());
-                }
+    /**
+     * ORC-SYS-002：同一申请最多一个有效外单号。
+     *
+     * <p>汇总 CONFIRMED_CREATED 与 OBSERVED_EXISTING 两种确定性下的 externalOrderId 集合。
+     */
+    private OracleResult checkSingleExternalOrder(OracleContext ctx) {
+        Map<String, Set<String>> ordersByApp = new HashMap<>();
+        for (ExternalInteraction interaction : ctx.interactions()) {
+            if (isConfirmed(interaction.sideEffectCertainty())) {
+                ordersByApp.computeIfAbsent(interaction.applicationId(), key -> new HashSet<>())
+                        .add(interaction.externalOrderId());
             }
         }
-        return OracleResult.pass(
-                "ORC-SYS-002", "NO_DUPLICATE_EXTERNAL_ORDER", "unique", "unique");
+        for (Map.Entry<String, Set<String>> entry : ordersByApp.entrySet()) {
+            if (entry.getValue().size() > 1) {
+                List<String> ids = new ArrayList<>(entry.getValue());
+                ids.sort(String::compareTo);
+                return OracleResult.fail("ORC-SYS-002", "NO_DUPLICATE_EXTERNAL_ORDER", "<=1",
+                        String.valueOf(entry.getValue().size()),
+                        "app=" + entry.getKey() + " orders=" + ids);
+            }
+        }
+        return OracleResult.pass("ORC-SYS-002", "NO_DUPLICATE_EXTERNAL_ORDER", "<=1", "<=1");
     }
 
+    /**
+     * ORC-SYS-003：UNKNOWN / UNCERTAIN 之后的下一次外部动作必须是 QUERY。
+     */
     private OracleResult checkUnknownQueryBeforeRetry(OracleContext ctx) {
-        java.util.Map<String, Integer> createCount = new java.util.HashMap<>();
-        for (ExternalInteraction i : ctx.interactions()) {
-            if (i.operation() == ExternalScript.Operation.CREATE) {
-                createCount.merge(i.applicationId(), 1, Integer::sum);
+        for (StateTransition transition : ctx.stateTransitions()) {
+            boolean uncertain = transition.applicationState() == ApplicationState.UNKNOWN
+                    || transition.outboxStatus() == OutboxStatus.UNCERTAIN;
+            if (!uncertain) {
+                continue;
+            }
+            ExternalCallAttempt next = nextAttemptAfter(ctx, transition);
+            if (next != null && next.operation() == ExternalScript.Operation.CREATE) {
+                return OracleResult.fail("ORC-SYS-003", "UNKNOWN_QUERY_BEFORE_RETRY", "QUERY", "CREATE",
+                        "app=" + transition.applicationId()
+                                + " after seq=" + transition.sequence()
+                                + " eventId=" + transition.eventId());
             }
         }
-        for (Integer c : createCount.values()) {
-            if (c > 1) {
-                return OracleResult.fail(
-                        "ORC-SYS-003", "UNKNOWN_QUERY_BEFORE_RETRY",
-                        "<=1", ">1", "duplicate create for one app");
-            }
-        }
-        return OracleResult.pass(
-                "ORC-SYS-003", "UNKNOWN_QUERY_BEFORE_RETRY", "<=1", "<=1");
+        return OracleResult.pass("ORC-SYS-003", "UNKNOWN_QUERY_BEFORE_RETRY", "QUERY", "QUERY");
     }
 
-    private OracleResult checkTerminalMonotonic(OracleContext ctx) {
-        for (TransferApplication a : ctx.applications()) {
-            ApplicationState s = a.state();
-            if (s != ApplicationState.CREATED
-                    && s != ApplicationState.DISPATCHED
-                    && s != ApplicationState.EXECUTING
-                    && s != ApplicationState.COMPLETED
-                    && s != ApplicationState.CANCELLED
-                    && s != ApplicationState.UNKNOWN) {
-                return OracleResult.fail(
-                        "ORC-SYS-004", "TERMINAL_MONOTONIC",
-                        "valid", "invalid", "app=" + a.applicationId());
+    private ExternalCallAttempt nextAttemptAfter(OracleContext ctx, StateTransition transition) {
+        ExternalCallAttempt next = null;
+        for (ExternalCallAttempt attempt : ctx.externalCallAttempts()) {
+            if (attempt.sequence() <= transition.sequence()) {
+                continue;
+            }
+            if (!attempt.applicationId().equals(transition.applicationId())) {
+                continue;
+            }
+            if (next == null || attempt.sequence() < next.sequence()) {
+                next = attempt;
             }
         }
-        return OracleResult.pass(
-                "ORC-SYS-004", "TERMINAL_MONOTONIC", "valid", "valid");
+        return next;
+    }
+
+    /**
+     * ORC-SYS-004：进入 COMPLETED / CANCELLED 之后不得再变。
+     */
+    private OracleResult checkTerminalMonotonic(OracleContext ctx) {
+        Map<String, ApplicationState> terminal = new HashMap<>();
+        for (StateTransition transition : ctx.stateTransitions()) {
+            ApplicationState state = transition.applicationState();
+            if (state == null) {
+                continue;
+            }
+            ApplicationState known = terminal.get(transition.applicationId());
+            if (known != null) {
+                if (state != known) {
+                    return OracleResult.fail("ORC-SYS-004", "TERMINAL_MONOTONIC", known.name(), state.name(),
+                            "app=" + transition.applicationId()
+                                    + " at seq=" + transition.sequence());
+                }
+                continue;
+            }
+            if (state.isTerminal()) {
+                terminal.put(transition.applicationId(), state);
+            }
+        }
+        return OracleResult.pass("ORC-SYS-004", "TERMINAL_MONOTONIC", "terminal-once", "terminal-once");
+    }
+
+    /**
+     * ORC-SYS-005：Evidence 等级必须精确等于 LOCAL_SIMULATION。
+     */
+    private OracleResult checkEvidenceLevel(OracleContext ctx) {
+        String actual = ctx.evidenceLevel();
+        return EVIDENCE_LEVEL.equals(actual)
+                ? OracleResult.pass("ORC-SYS-005", "EVIDENCE_LEVEL", EVIDENCE_LEVEL, actual)
+                : OracleResult.fail("ORC-SYS-005", "EVIDENCE_LEVEL", EVIDENCE_LEVEL,
+                        actual == null ? "null" : actual, "evidence level escalated");
+    }
+
+    /**
+     * ORC-SYS-006：外部执行端口必须是 ScriptedFakeRcsAdapter，且真实外部写为 0。
+     */
+    private OracleResult checkNoRealExternalWrite(OracleContext ctx) {
+        boolean portOk = PORT_TYPE.equals(ctx.executionPortType());
+        boolean writeOk = ctx.realExternalWriteCount() == 0;
+        String actual = "port=" + ctx.executionPortType()
+                + " realExternalWriteCount=" + ctx.realExternalWriteCount();
+        if (portOk && writeOk) {
+            return OracleResult.pass("ORC-SYS-006", "NO_REAL_EXTERNAL_WRITE", "port=" + PORT_TYPE
+                    + " realExternalWriteCount=0", actual);
+        }
+        return OracleResult.fail("ORC-SYS-006", "NO_REAL_EXTERNAL_WRITE",
+                "port=" + PORT_TYPE + " realExternalWriteCount=0", actual, "real external write risk");
+    }
+
+    private boolean isConfirmed(String certainty) {
+        return ExternalInteraction.CONFIRMED_CREATED.equals(certainty)
+                || ExternalInteraction.OBSERVED_EXISTING.equals(certainty);
     }
 
     // ---------- 场景 EXPECT ----------
 
-    /**
-     * 场景文件中声明的 EXPECT 规则。
-     */
     private List<OracleResult> checkScenarioExpects(OracleContext ctx) {
         List<OracleResult> list = new ArrayList<>();
-
         for (OracleRule rule : scenario.oracles()) {
             switch (rule.ruleType()) {
                 case APPLICATION_STATE -> list.add(checkApplicationState(rule, ctx));
@@ -168,24 +214,39 @@ public class InvariantOracle {
     private OracleResult checkApplicationState(OracleRule rule, OracleContext ctx) {
         String appId = rule.arguments().get(0);
         String want = rule.arguments().get(1);
-        String actual = ctx.applications().stream()
-                .filter(a -> a.applicationId().equals(appId))
-                .findFirst()
-                .map(a -> a.state().name())
-                .orElse("MISSING");
+        String actual = "MISSING";
+        for (TransferApplication app : ctx.applications()) {
+            if (app.applicationId().equals(appId)) {
+                actual = app.state().name();
+                break;
+            }
+        }
         return want.equals(actual)
                 ? OracleResult.pass(rule.oracleId(), "APPLICATION_STATE", want, actual)
                 : OracleResult.fail(rule.oracleId(), "APPLICATION_STATE", want, actual, "");
     }
 
+    /**
+     * OUTBOX_STATUS 不使用 findFirst：
+     * 0 条 → MISSING；>1 条 → DUPLICATE_OUTBOX；恰 1 条才比对。
+     */
     private OracleResult checkOutboxStatus(OracleRule rule, OracleContext ctx) {
         String appId = rule.arguments().get(0);
         String want = rule.arguments().get(1);
-        String actual = ctx.outbox().stream()
-                .filter(o -> o.applicationId().equals(appId))
-                .findFirst()
-                .map(o -> o.status().name())
-                .orElse("MISSING");
+        List<OutboxEntry> matches = new ArrayList<>();
+        for (OutboxEntry entry : ctx.outbox()) {
+            if (entry.applicationId().equals(appId)) {
+                matches.add(entry);
+            }
+        }
+        if (matches.isEmpty()) {
+            return OracleResult.fail(rule.oracleId(), "OUTBOX_STATUS", want, "MISSING", "no outbox entry");
+        }
+        if (matches.size() > 1) {
+            return OracleResult.fail(rule.oracleId(), "OUTBOX_STATUS", want, "DUPLICATE_OUTBOX",
+                    "entries=" + matches.size());
+        }
+        String actual = matches.get(0).status().name();
         return want.equals(actual)
                 ? OracleResult.pass(rule.oracleId(), "OUTBOX_STATUS", want, actual)
                 : OracleResult.fail(rule.oracleId(), "OUTBOX_STATUS", want, actual, "");
@@ -194,10 +255,13 @@ public class InvariantOracle {
     private OracleResult checkCreateCalls(OracleRule rule, OracleContext ctx) {
         String appId = rule.arguments().get(0);
         int want = Integer.parseInt(rule.arguments().get(1));
-        int actual = (int) ctx.interactions().stream()
-                .filter(i -> i.applicationId().equals(appId))
-                .filter(i -> i.operation() == ExternalScript.Operation.CREATE)
-                .count();
+        int actual = 0;
+        for (ExternalInteraction interaction : ctx.interactions()) {
+            if (interaction.applicationId().equals(appId)
+                    && interaction.operation() == ExternalScript.Operation.CREATE) {
+                actual++;
+            }
+        }
         return want == actual
                 ? OracleResult.pass(rule.oracleId(), "CREATE_CALLS",
                         String.valueOf(want), String.valueOf(actual))
@@ -208,10 +272,13 @@ public class InvariantOracle {
     private OracleResult checkQueryCalls(OracleRule rule, OracleContext ctx) {
         String appId = rule.arguments().get(0);
         int want = Integer.parseInt(rule.arguments().get(1));
-        int actual = (int) ctx.interactions().stream()
-                .filter(i -> i.applicationId().equals(appId))
-                .filter(i -> i.operation() == ExternalScript.Operation.QUERY)
-                .count();
+        int actual = 0;
+        for (ExternalInteraction interaction : ctx.interactions()) {
+            if (interaction.applicationId().equals(appId)
+                    && interaction.operation() == ExternalScript.Operation.QUERY) {
+                actual++;
+            }
+        }
         return want == actual
                 ? OracleResult.pass(rule.oracleId(), "QUERY_CALLS",
                         String.valueOf(want), String.valueOf(actual))
@@ -222,14 +289,7 @@ public class InvariantOracle {
     private OracleResult checkValidExternalOrders(OracleRule rule, OracleContext ctx) {
         String appId = rule.arguments().get(0);
         int want = Integer.parseInt(rule.arguments().get(1));
-        Set<String> orders = new HashSet<>();
-        for (ExternalInteraction i : ctx.interactions()) {
-            if (i.applicationId().equals(appId)
-                    && i.sideEffectCertainty().equals(ExternalInteraction.CONFIRMED_CREATED)) {
-                orders.add(i.externalOrderId());
-            }
-        }
-        int actual = orders.size();
+        int actual = confirmedOrdersOf(appId, ctx).size();
         return want == actual
                 ? OracleResult.pass(rule.oracleId(), "VALID_EXTERNAL_ORDERS",
                         String.valueOf(want), String.valueOf(actual))
@@ -238,18 +298,21 @@ public class InvariantOracle {
     }
 
     private OracleResult checkNoDuplicateRule(OracleRule rule, OracleContext ctx) {
-        String appId = rule.arguments().get(0);
+        int actual = confirmedOrdersOf(rule.arguments().get(0), ctx).size();
+        return actual <= 1
+                ? OracleResult.pass(rule.oracleId(), "NO_DUPLICATE_EXTERNAL_ORDER",
+                        "<=1", String.valueOf(actual))
+                : OracleResult.fail(rule.oracleId(), "NO_DUPLICATE_EXTERNAL_ORDER",
+                        "<=1", String.valueOf(actual), "");
+    }
+
+    private Set<String> confirmedOrdersOf(String appId, OracleContext ctx) {
         Set<String> orders = new HashSet<>();
-        for (ExternalInteraction i : ctx.interactions()) {
-            if (i.applicationId().equals(appId)
-                    && i.sideEffectCertainty().equals(ExternalInteraction.CONFIRMED_CREATED)) {
-                orders.add(i.externalOrderId());
+        for (ExternalInteraction interaction : ctx.interactions()) {
+            if (interaction.applicationId().equals(appId) && isConfirmed(interaction.sideEffectCertainty())) {
+                orders.add(interaction.externalOrderId());
             }
         }
-        return orders.size() <= 1
-                ? OracleResult.pass(rule.oracleId(), "NO_DUPLICATE_EXTERNAL_ORDER",
-                        "<=1", String.valueOf(orders.size()))
-                : OracleResult.fail(rule.oracleId(), "NO_DUPLICATE_EXTERNAL_ORDER",
-                        "<=1", String.valueOf(orders.size()), "");
+        return orders;
     }
 }

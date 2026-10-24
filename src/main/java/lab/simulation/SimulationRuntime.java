@@ -3,102 +3,118 @@ package lab.simulation;
 import lab.ApplicationState;
 import lab.MemoryStorage;
 import lab.OutboxEntry;
+import lab.OutboxStatus;
 import lab.Registry;
 import lab.RegistryException;
 import lab.TransferApplication;
 
+import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 仿真运行时。
  *
  * <p>按顺序驱动场景：建立全新的 Storage / Registry / Clock / Fake，
- * 依次推进虚拟时间并执行事件，收集外部交互、Oracle 结果和运行结果。
+ * 依次推进虚拟时间并执行事件，收集外部交互、状态轨迹、调用尝试、Oracle 结果和运行结果。
  *
- * <p>运行状态：
- * <pre>
- *   PREPARED → RUNNING → COMPLETED
- *                      ↘ FAILED
- *                      ↘ INCONCLUSIVE
- * </pre>
+ * <p>运行语义：
+ * <ul>
+ *   <li>单次运行：同一个实例第二次调用 {@link #run()} 抛 SIM_RUNTIME_ALREADY_USED</li>
+ *   <li>首错即停：第一个失败事件之后的事件全部记为 EVENT_SKIPPED，
+ *       不推进时钟、不调 Registry、不调外部端口、不改状态</li>
+ *   <li>未消费外部脚本 → FAILED + UNCONSUMED_EXTERNAL_SCRIPT</li>
+ * </ul>
+ *
+ * <p>运行状态：PREPARED → RUNNING → COMPLETED / FAILED / INCONCLUSIVE。
  */
 public class SimulationRuntime {
 
     private final ScenarioPackage scenario;
+    private final RunFactLog facts = new RunFactLog();
     private final List<EventRecord> timeline = new ArrayList<>();
     private String runStatus = "PREPARED";
+    private boolean used;
+    private RuntimeContext ctx;
+    private int planned;
+    private int executed;
+    private int skipped;
 
     public SimulationRuntime(ScenarioPackage scenario) {
         this.scenario = scenario;
     }
 
     /**
-     * 执行整个场景。
+     * 执行整个场景；同一个实例只允许运行一次。
      */
     public SimulationRunResult run() {
+        if (used) {
+            throw new ScenarioValidationException("SIM_RUNTIME_ALREADY_USED", scenario.scenarioId());
+        }
+        used = true;
         runStatus = "RUNNING";
 
-        RuntimeContext ctx = setup();
-        EventStats stats = executeEvents(ctx);
-        List<OracleResult> oracleResults = checkOracle(ctx, stats);
-        String finalStatus = decideStatus(ctx.fake(), stats, oracleResults);
+        ctx = setup();
+        Execution execution = executeEvents(ctx);
+        planned = scenario.events().size();
+        executed = execution.pass() + execution.fail();
+        skipped = execution.skipped();
+
+        List<OracleResult> oracleResults = checkOracle(ctx, execution);
+        RunFailure firstFailure = decideFirstFailure(ctx, execution, oracleResults);
+        String finalStatus = firstFailure == null
+                ? SimulationRunResult.COMPLETED
+                : SimulationRunResult.FAILED;
         runStatus = finalStatus;
 
-        return buildResult(ctx, stats, oracleResults, finalStatus);
+        return buildResult(ctx, execution, oracleResults, finalStatus, firstFailure);
     }
 
     // ---------- 1. 建立运行时上下文 ----------
 
-    /**
-     * 建立一次运行所需的全部对象：
-     * VirtualClock、MemoryStorage、ScriptedFakeRcsAdapter、
-     * Registry 和 RegistrySimulationTarget。
-     *
-     * <p>每次调用都创建全新实例，不共享静态状态。
-     */
     private RuntimeContext setup() {
         VirtualClock clock = new VirtualClock(scenario.startAt());
         MemoryStorage storage = new MemoryStorage();
-        ScriptedFakeRcsAdapter fake = new ScriptedFakeRcsAdapter(clock, scenario.externalScripts());
+        ScriptedFakeRcsAdapter fake = new ScriptedFakeRcsAdapter(clock, scenario.externalScripts(), facts);
         Registry registry = new Registry(storage, fake, false);
         RegistrySimulationTarget target = new RegistrySimulationTarget(registry);
         return new RuntimeContext(clock, storage, registry, fake, target);
     }
 
-    // ---------- 2. 执行事件 ----------
+    // ---------- 2. 执行事件（首错即停） ----------
 
-    /**
-     * 按 scenario.events() 顺序遍历事件，推进虚拟时间，并记录时间线。
-     *
-     * <p>每个事件的 RegistryException 或 ScenarioValidationException
-     * 会转成一条 EVENT_FAIL 记录，不中断后续事件。
-     */
-    private EventStats executeEvents(RuntimeContext ctx) {
+    private Execution executeEvents(RuntimeContext ctx) {
         int eventPass = 0;
         int eventFail = 0;
+        int eventSkipped = 0;
+        RunFailure firstFailure = null;
 
         for (ScenarioEvent event : scenario.events()) {
+            if (firstFailure != null) {
+                // 首错之后：只记 EVENT_SKIPPED，不推进时钟、不调 Registry、不调 Port
+                timeline.add(new EventRecord(event, "EVENT_SKIPPED", "", ctx.clock().now()));
+                eventSkipped++;
+                continue;
+            }
+
             ctx.clock().advanceTo(event.offsetMillis());
             try {
                 dispatch(ctx.target(), event);
-                timeline.add(new EventRecord(event, "EVENT_PASS", ""));
+                timeline.add(new EventRecord(event, "EVENT_PASS", "", ctx.clock().now()));
                 eventPass++;
-            } catch (RegistryException e) {
-                timeline.add(new EventRecord(event, "EVENT_FAIL", describe(e)));
+            } catch (RegistryException | ScenarioValidationException e) {
+                timeline.add(new EventRecord(event, "EVENT_FAIL", describe(e), ctx.clock().now()));
                 eventFail++;
-            } catch (ScenarioValidationException e) {
-                timeline.add(new EventRecord(event, "EVENT_FAIL", describe(e)));
-                eventFail++;
+                firstFailure = new RunFailure(event.eventId(), code(e));
             }
+            recordStateTransitions(ctx, event);
         }
 
-        return new EventStats(eventPass, eventFail);
+        return new Execution(eventPass, eventFail, eventSkipped, firstFailure);
     }
 
-    /**
-     * 把动作分派到 target 的对应方法。
-     */
     private void dispatch(SimulationTarget target, ScenarioEvent event) {
         List<String> args = event.arguments();
         switch (event.action()) {
@@ -113,66 +129,93 @@ public class SimulationRuntime {
         }
     }
 
-    private String describe(RegistryException e) {
-        return e.code() + (e.detail().isEmpty() ? "" : " " + e.detail());
+    /**
+     * 记录一个事件执行后的状态快照（每个申请一条）。
+     */
+    private void recordStateTransitions(RuntimeContext ctx, ScenarioEvent event) {
+        List<OutboxEntry> outbox = ctx.registry().listOutbox();
+        for (TransferApplication app : ctx.registry().listApplications()) {
+            OutboxStatus status = null;
+            for (OutboxEntry entry : outbox) {
+                if (entry.applicationId().equals(app.applicationId())) {
+                    status = entry.status();
+                    break;
+                }
+            }
+            facts.recordTransition(new StateTransition(
+                    facts.nextSequence(), ctx.clock().now(), event.eventId(),
+                    app.applicationId(), app.state(), status));
+        }
     }
 
-    private String describe(ScenarioValidationException e) {
-        return e.code() + (e.detail().isEmpty() ? "" : " " + e.detail());
+    private String code(RuntimeException e) {
+        if (e instanceof RegistryException registryException) {
+            return registryException.code();
+        }
+        if (e instanceof ScenarioValidationException validationException) {
+            return validationException.code();
+        }
+        return "INTERNAL_ERROR";
+    }
+
+    private String describe(RuntimeException e) {
+        if (e instanceof RegistryException registryException) {
+            return registryException.code()
+                    + (registryException.detail().isEmpty() ? "" : " " + registryException.detail());
+        }
+        if (e instanceof ScenarioValidationException validationException) {
+            return validationException.code()
+                    + (validationException.detail().isEmpty() ? "" : " " + validationException.detail());
+        }
+        return "INTERNAL_ERROR";
     }
 
     // ---------- 3. 执行 Oracle ----------
 
-    /**
-     * 收集业务对象快照，并调用 InvariantOracle 检查。
-     */
-    private List<OracleResult> checkOracle(RuntimeContext ctx, EventStats stats) {
+    private List<OracleResult> checkOracle(RuntimeContext ctx, Execution execution) {
         List<TransferApplication> apps = ctx.registry().listApplications();
         List<OutboxEntry> outbox = ctx.registry().listOutbox();
-        List<ExternalInteraction> interactions = ctx.fake().interactions();
 
-        OracleContext oracleCtx = new OracleContext(apps, outbox, interactions);
-        InvariantOracle oracle = new InvariantOracle(scenario, this);
-        return oracle.check(oracleCtx);
+        OracleContext oracleCtx = new OracleContext(
+                apps,
+                outbox,
+                ctx.fake().interactions(),
+                facts.attempts(),
+                facts.transitions(),
+                execution.firstFailure() == null ? List.of() : List.of(execution.firstFailure()),
+                planned,
+                executed,
+                skipped,
+                SimulationRunResult.EVIDENCE_LEVEL,
+                ctx.fake().getClass().getSimpleName(),
+                0);
+        return new InvariantOracle(scenario).check(oracleCtx);
     }
 
-    // ---------- 4. 决定最终状态 ----------
+    // ---------- 4. 决定首个失败 ----------
 
     /**
-     * 综合外部脚本消费情况、事件失败数、Oracle 结果决定最终状态。
-     *
-     * <p>优先级：
-     * <ol>
-     *   <li>有脚本未消费 → FAILED</li>
-     *   <li>有事件失败 → FAILED</li>
-     *   <li>有 Oracle FAIL → FAILED</li>
-     *   <li>否则 → COMPLETED</li>
-     * </ol>
+     * 失败优先级：事件失败 > 未消费脚本 > Oracle 不满足。
      */
-    private String decideStatus(ScriptedFakeRcsAdapter fake, EventStats stats,
-                                List<OracleResult> oracleResults) {
-        if (!allScriptsConsumed(fake)) {
-            return SimulationRunResult.FAILED;
+    private RunFailure decideFirstFailure(RuntimeContext ctx, Execution execution,
+                                          List<OracleResult> oracleResults) {
+        if (execution.firstFailure() != null) {
+            return execution.firstFailure();
         }
-        if (stats.eventFail() > 0) {
-            return SimulationRunResult.FAILED;
+        if (!allScriptsConsumed(ctx.fake())) {
+            return new RunFailure(null, "UNCONSUMED_EXTERNAL_SCRIPT");
         }
-        for (OracleResult r : oracleResults) {
-            if (r.status() == OracleResult.Status.FAIL) {
-                return SimulationRunResult.FAILED;
+        for (OracleResult result : oracleResults) {
+            if (result.status() == OracleResult.Status.FAIL) {
+                return new RunFailure(null, result.oracleId());
             }
         }
-        return SimulationRunResult.COMPLETED;
+        return null;
     }
 
     private boolean allScriptsConsumed(ScriptedFakeRcsAdapter fake) {
         for (ExternalScript s : scenario.externalScripts()) {
-            if (s.operation() == ExternalScript.Operation.CREATE
-                    && fake.callCount(ExternalScript.Operation.CREATE) < s.ordinal()) {
-                return false;
-            }
-            if (s.operation() == ExternalScript.Operation.QUERY
-                    && fake.callCount(ExternalScript.Operation.QUERY) < s.ordinal()) {
+            if (fake.callCount(s.operation()) < s.ordinal()) {
                 return false;
             }
         }
@@ -181,24 +224,32 @@ public class SimulationRuntime {
 
     // ---------- 5. 构造结果 ----------
 
-    private SimulationRunResult buildResult(RuntimeContext ctx, EventStats stats,
+    private SimulationRunResult buildResult(RuntimeContext ctx, Execution execution,
                                             List<OracleResult> oracleResults,
-                                            String status) {
+                                            String status, RunFailure firstFailure) {
         return new SimulationRunResult(
+                SimulationRunResult.SCHEMA_VERSION,
                 status,
                 scenario.scenarioId(),
                 scenario.version(),
-                scenario.events().size(),
-                stats.eventPass(),
-                stats.eventFail(),
+                planned,
+                executed,
+                execution.pass(),
+                execution.fail(),
+                skipped,
+                firstFailure == null ? null : firstFailure.eventId(),
+                firstFailure == null ? null : firstFailure.code(),
+                SimulationRunResult.EVIDENCE_LEVEL,
+                0,
                 ctx.fake().callCount(ExternalScript.Operation.CREATE),
                 ctx.fake().callCount(ExternalScript.Operation.QUERY),
                 ctx.fake().validExternalOrderCount(),
+                timeline(),
                 ctx.fake().interactions(),
                 oracleResults);
     }
 
-    // ---------- 时间线 ----------
+    // ---------- 快照访问器 ----------
 
     /**
      * 事件时间线快照。
@@ -208,16 +259,114 @@ public class SimulationRuntime {
     }
 
     /**
-     * 一条事件执行记录。
+     * 外部交互快照（脚本化且产生结果的调用）。
      */
-    public record EventRecord(ScenarioEvent event, String status, String detail) {
+    public List<ExternalInteraction> interactions() {
+        return ctx == null ? List.of() : ctx.fake().interactions();
+    }
+
+    /**
+     * 全部外部调用尝试（含未脚本化）。
+     */
+    public List<ExternalCallAttempt> externalCallAttempts() {
+        return facts.attempts();
+    }
+
+    /**
+     * 事件级状态轨迹。
+     */
+    public List<StateTransition> stateTransitions() {
+        return facts.transitions();
+    }
+
+    /**
+     * 运行结束时的申请状态。
+     */
+    public Map<String, ApplicationState> finalApplicationStates() {
+        if (ctx == null) {
+            return Map.of();
+        }
+        Map<String, ApplicationState> map = new LinkedHashMap<>();
+        for (TransferApplication app : ctx.registry().listApplications()) {
+            map.put(app.applicationId(), app.state());
+        }
+        return Map.copyOf(map);
+    }
+
+    /**
+     * 运行结束时的 Outbox 状态。
+     */
+    public Map<String, OutboxStatus> finalOutboxStates() {
+        if (ctx == null) {
+            return Map.of();
+        }
+        Map<String, OutboxStatus> map = new LinkedHashMap<>();
+        for (OutboxEntry entry : ctx.registry().listOutbox()) {
+            map.put(entry.applicationId(), entry.status());
+        }
+        return Map.copyOf(map);
+    }
+
+    /**
+     * 计划事件数。
+     */
+    public int plannedCount() {
+        return planned;
+    }
+
+    /**
+     * 已执行事件数。
+     */
+    public int executedCount() {
+        return executed;
+    }
+
+    /**
+     * 跳过事件数。
+     */
+    public int skippedCount() {
+        return skipped;
+    }
+
+    /**
+     * 一条事件执行记录。
+     *
+     * <p>字段固定为 eventId / plannedOffsetMillis / logicalSequence / action /
+     * status / virtualOccurredAt / detail。
+     */
+    public record EventRecord(ScenarioEvent event, String status, String detail, Instant virtualOccurredAt) {
+
+        /**
+         * 事件编号。
+         */
+        public String eventId() {
+            return event.eventId();
+        }
+
+        /**
+         * 计划偏移（毫秒）。
+         */
+        public long plannedOffsetMillis() {
+            return event.offsetMillis();
+        }
+
+        /**
+         * 逻辑序号。
+         */
+        public long logicalSequence() {
+            return event.logicalSequence();
+        }
+
+        /**
+         * 动作。
+         */
+        public ScenarioEvent.Action action() {
+            return event.action();
+        }
     }
 
     // ---------- 辅助类型 ----------
 
-    /**
-     * 一次运行所需的全部对象引用。
-     */
     private record RuntimeContext(
             VirtualClock clock,
             MemoryStorage storage,
@@ -226,9 +375,6 @@ public class SimulationRuntime {
             RegistrySimulationTarget target) {
     }
 
-    /**
-     * 事件执行统计。
-     */
-    private record EventStats(int eventPass, int eventFail) {
+    private record Execution(int pass, int fail, int skipped, RunFailure firstFailure) {
     }
 }
