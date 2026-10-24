@@ -126,7 +126,7 @@ public final class SimulationRuntimeChecks {
         require("LOCAL_SIMULATION".equals(r.evidenceLevel()), "evidenceLevel=" + r.evidenceLevel());
         require(r.realExternalWriteCount() == 0, "realExternalWriteCount=" + r.realExternalWriteCount());
         require(r.oracleFailCount() == 0, "oracleFail=" + r.oracleFailCount());
-        require(r.oraclePassCount() == 11, "oraclePass=" + r.oraclePassCount());
+        require(r.oraclePassCount() == 17, "oraclePass=" + r.oraclePassCount());
         require(r.createCallCount() == 1, "creates=" + r.createCallCount());
         require(r.queryCallCount() == 0, "queries=" + r.queryCallCount());
         require(r.validExternalOrderCount() == 1, "externalOrders=" + r.validExternalOrderCount());

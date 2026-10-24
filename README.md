@@ -215,20 +215,22 @@
 
     bash scripts/verify-simulation.sh
 
-脚本固定 28 步，任一步失败立即非零退出，不吞结果。它依次完成：
+脚本固定 35 步，任一步失败立即非零退出，不吞结果。它依次完成：
 
 1. 仓库根自检、JDK 21 自检、只清理 `out` / `build/runs` / `build/case-runs` / `build/test-temp`；
 2. 用 `LC_ALL=C sort` 生成源文件清单，编译到 `out/main`、`out/test`，并核对 `major version: 65`；
-3. 六个检查入口逐字核对：`CHECKS_PASSED=279`、`CONCURRENCY_CHECKS_PASSED=8`、`RELIABILITY_R1_CASES_PASSED=14`、`SCENARIO_PARSER_CASES_PASSED=16`、`SIMULATION_RUNTIME_CASES_PASSED=18`、`REPLAY_EVIDENCE_R1_CASES_PASSED=12`；
-4. 30 个旧 case 各自在 `build/case-runs/<name>` 独立工作目录运行，产物写 `build/case-runs/<name>.actual.txt`，与 `cases/<name>.expected.txt` 逐字节 diff；
-5. 3 个合法场景 validate 退出 0；2 个 parse 非法场景退出 2 且输出稳定 code；`run scenarios/invalid/invalid-unscripted-call.scenario` 退出 1、`RUN_FAILED`、`ORC-SYS-001=FAIL`；
-6. 3 个合法场景各 run 一次，SIM-002 再 run 一次并 `compare` → `REPLAY_MATCH`；
-7. 5 个证据目录逐一 `sha256sum -c manifest.sha256`，核对 7 文件形状、manifest 6 行、`run-summary.txt` 21 字段顺序；
-8. 扫描 Evidence 与 README/docs 的绝对路径、用户名、凭据值、真实内网 IP、越级声明词，并检查工作区无 `.class` / `.db` / `-wal` / `-shm` / `-journal` 残留、源码无 `Thread.sleep` / `Instant.now` / `currentTimeMillis`。
+3. 六个 Part A 检查入口逐字核对：`CHECKS_PASSED=279`、`CONCURRENCY_CHECKS_PASSED=8`、`RELIABILITY_R1_CASES_PASSED=14`、`SCENARIO_PARSER_CASES_PASSED=16`、`SIMULATION_RUNTIME_CASES_PASSED=18`、`REPLAY_EVIDENCE_R1_CASES_PASSED=12`；
+4. 四个资源检查入口逐字核对：`RESOURCE_WORLD_CASES_PASSED=24`、`RESOURCE_STORAGE_CASES_PASSED=6`、`RESOURCE_PARSER_CASES_PASSED=7`、`RESOURCE_SCENARIO_CASES_PASSED=10`；
+5. 30 个旧 case 各自在 `build/case-runs/<name>` 独立工作目录运行，产物写 `build/case-runs/<name>.actual.txt`，与 `cases/<name>.expected.txt` 逐字节 diff；
+6. 3 个合法场景 validate 退出 0；2 个 parse 非法场景退出 2 且输出稳定 code；`run scenarios/invalid/invalid-unscripted-call.scenario` 退出 1、`RUN_FAILED`、`ORC-SYS-001=FAIL`；
+7. 3 个合法场景各 run 一次，SIM-002 再 run 一次并 `compare` → `REPLAY_MATCH`；
+8. 6 个资源合法场景 validate 退出 0，各 run 两次并 `compare` → 6 对 `REPLAY_MATCH`；5 个资源非法场景退出 1、稳定 code 且首错后全部 `EVENT_SKIPPED`；
+9. 22 个证据目录逐一 `sha256sum -c manifest.sha256`，核对 7 文件形状、manifest 6 行、`run-summary.txt` 21 字段顺序，并核对 `ORC-RES-SYS-006` 的 `restartPairs=<n>,mismatches=<m>` 形态；
+10. 扫描 Evidence 与 README/docs 的绝对路径、用户名、凭据值、真实内网 IP、越级声明词，并检查工作区无 `.class` / `.db` / `-wal` / `-shm` / `-journal` 残留、源码无 `Thread.sleep` / `Instant.now` / `currentTimeMillis`。
 
 全部通过的终点行（逐字）：
 
-    SIMULATION_R1_VERIFICATION_PASS originalCases=30 validScenarios=3 invalidScenarios=3 replay=1 evidenceBundles=5 realExternalWrites=0
+    SIMULATION_RESOURCE_VERIFICATION_PASS originalCases=30 baseValidScenarios=3 baseInvalidScenarios=3 resourceValidScenarios=6 resourceInvalidScenarios=5 resourceReplay=6 realExternalWrites=0
 
 ## 确定性仿真
 
@@ -262,6 +264,10 @@
 
 3 个非法场景：`scenarios/invalid/invalid-backward-time.scenario`（`SCENARIO_EVENT_ORDER`）、`invalid-duplicate-event.scenario`（`SCENARIO_DUPLICATE_EVENT`）、`invalid-unscripted-call.scenario`（运行期 `UNSCRIPTED_EXTERNAL_CALL`）。
 
+6 个资源合法场景（`scenarios/resource/`）：`sim-101-single-hold-release`（单容量占用/释放）、`sim-102-queue-order`（队列稳定排序）、`sim-103-queue-promotion`（队首晋升）、`sim-104-idempotent-request`（幂等请求）、`sim-105-disable-enable`（禁用不驱逐/启用晋升）、`sim-106-restart-recovery`（两次重启后恢复并继续晋升）。
+
+5 个资源非法场景（`scenarios/resource/invalid/`）：`SIM-INVALID-101` 缺 Destination（`RESOURCE_TARGET_MISMATCH`）、`SIM-INVALID-102` 缺 Point（`UNKNOWN_POINT`）、`SIM-INVALID-103` 冲突（`RESERVATION_CONFLICT`）、`SIM-INVALID-104` 终态重开（`RESERVATION_TERMINAL`）、`SIM-INVALID-105` 引用不匹配（`RESOURCE_TARGET_MISMATCH`）。
+
 ### 证据目录
 
 每次 `run` 生成 7 个文件：`scenario.scenario`、`scenario.sha256`、`run-summary.txt`（21 个固定字段）、`event-timeline.tsv`、`external-interactions.tsv`、`oracle-results.tsv`、`manifest.sha256`。字段与列格式见 `docs/simulation-format.md`。
@@ -275,13 +281,22 @@
 - ORC-SYS-005 Evidence 不越级（`LOCAL_SIMULATION`）
 - ORC-SYS-006 零真实外部写
 
+### 资源不变量
+
+- ORC-RES-SYS-001 单容量：同一资源任一观察点最多一个 HELD
+- ORC-RES-SYS-002 队列顺序：`offset → logicalSequence → applicationId`，晋升只取队首
+- ORC-RES-SYS-003 终态单调：`RELEASED` / `CANCELLED` 不可重开
+- ORC-RES-SYS-004 幂等稳定：`IDEMPOTENT` 请求不改变编号、状态与排序键
+- ORC-RES-SYS-005 禁用不驱逐：`RESOURCE_SET ... DISABLED` 前后 holder 集合不变
+- ORC-RES-SYS-006 重启一致：`restartPairs=<n>,mismatches=<m>`，逐对比较 `WORLD_RESTART` 前后规范摘要
+
 ## 禁止范围
 
 - 不登录、探测或修改 lab-server-01；不访问实验室工作站、NAS、现场网络。
 - 不连接真实 M4、AGV、线边仓、PLC、MES、上位机或数据库；不实现真实 M4 字段合同。
 - 不用网络请求替代本地 Fake；不用真实 `Thread.sleep` 等待逻辑时间；不以系统当前时间决定业务结论。
 - 不产生任何真实外部写：`realExternalWrites=0`。
-- Part B 资源领域模型已接线（PR4：`lab.simulation.resource` 九个领域类 + 资源存储 + 8 个 Action / 8 个 EXPECT 的 parse 期校验）；资源运行时与资源场景未开始（PR5/PR6）。
+- 不将资源仿真的单容量、队列顺序、`WORLD_RESTART` 一致声明为真实 AGV / PLC / MES 合同或容量结论。
 - 不修改 `cases/*.expected.txt`（唯一例外见 `docs/delivery-verification.md` 的 D-13：SQLite Migration 3 导致的两个 migration golden 版本行同步）；不用 `catch (Exception ignored)` 吞错。
 - 不声称 `M4_CONTRACT_PASS`、`VERIFIED_LAB`、`SITE_PASS`、`PRODUCTION_READY`、`CAPACITY_PASS`。
 
@@ -300,3 +315,4 @@
 - `docs/simulation-handoff.md` — 仿真交付说明
 - `docs/delivery-verification.md` — 分阶段复验记录
 - `docs/mutation-results.md` — MUT-01..05 变异测试记录
+- `docs/resource-mutation-results.md` — RES-MUT-01..06 资源变异测试记录

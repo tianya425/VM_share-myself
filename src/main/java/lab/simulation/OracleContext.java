@@ -2,6 +2,7 @@ package lab.simulation;
 
 import lab.OutboxEntry;
 import lab.TransferApplication;
+import lab.simulation.resource.ResourceWorldSnapshot;
 
 import java.util.List;
 
@@ -22,6 +23,9 @@ import java.util.List;
  *   <li>evidenceLevel         — 证据等级（必须精确等于 LOCAL_SIMULATION）</li>
  *   <li>executionPortType     — 外部执行端口实现类名</li>
  *   <li>realExternalWriteCount — 真实外部写入次数（必须为 0）</li>
+ *   <li>resourceWorld         — 最终资源世界规范快照</li>
+ *   <li>resourceSteps         — 每个资源 Action 执行后的观察记录</li>
+ *   <li>restartPairs          — 每次 WORLD_RESTART 的前后摘要对</li>
  * </ul>
  */
 public record OracleContext(
@@ -36,7 +40,10 @@ public record OracleContext(
         int skippedCount,
         String evidenceLevel,
         String executionPortType,
-        int realExternalWriteCount) {
+        int realExternalWriteCount,
+        ResourceWorldSnapshot resourceWorld,
+        List<ResourceStep> resourceSteps,
+        List<RestartPair> restartPairs) {
 
     public OracleContext {
         applications = List.copyOf(applications);
@@ -45,5 +52,30 @@ public record OracleContext(
         externalCallAttempts = List.copyOf(externalCallAttempts);
         stateTransitions = List.copyOf(stateTransitions);
         runFailures = List.copyOf(runFailures);
+        resourceWorld = resourceWorld == null ? ResourceWorldSnapshot.empty() : resourceWorld;
+        resourceSteps = List.copyOf(resourceSteps);
+        restartPairs = List.copyOf(restartPairs);
+    }
+
+    /**
+     * 兼容构造器：没有资源事实的上下文（资源世界为空、无资源动作、无重启）。
+     *
+     * <p>仅供不涉及资源的既有检查使用；运行期一律走完整构造器。
+     */
+    public OracleContext(List<TransferApplication> applications,
+                         List<OutboxEntry> outbox,
+                         List<ExternalInteraction> interactions,
+                         List<ExternalCallAttempt> externalCallAttempts,
+                         List<StateTransition> stateTransitions,
+                         List<RunFailure> runFailures,
+                         int plannedCount,
+                         int executedCount,
+                         int skippedCount,
+                         String evidenceLevel,
+                         String executionPortType,
+                         int realExternalWriteCount) {
+        this(applications, outbox, interactions, externalCallAttempts, stateTransitions, runFailures,
+                plannedCount, executedCount, skippedCount, evidenceLevel, executionPortType,
+                realExternalWriteCount, ResourceWorldSnapshot.empty(), List.of(), List.of());
     }
 }

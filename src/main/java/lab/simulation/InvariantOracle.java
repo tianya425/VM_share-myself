@@ -4,6 +4,10 @@ import lab.ApplicationState;
 import lab.OutboxEntry;
 import lab.OutboxStatus;
 import lab.TransferApplication;
+import lab.simulation.resource.Reservation;
+import lab.simulation.resource.ReservationState;
+import lab.simulation.resource.ResourceWorldSnapshot;
+import lab.simulation.resource.VirtualResource;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -56,6 +60,9 @@ public class InvariantOracle {
         list.add(checkTerminalMonotonic(ctx));
         list.add(checkEvidenceLevel(ctx));
         list.add(checkNoRealExternalWrite(ctx));
+        // Part B：六条资源不变量始终启用、真算。
+        list.addAll(ResourceInvariantOracle.check(
+                ctx.resourceWorld(), ctx.resourceSteps(), ctx.restartPairs()));
         return list;
     }
 
@@ -206,9 +213,14 @@ public class InvariantOracle {
                 case QUERY_CALLS -> list.add(checkQueryCalls(rule, ctx));
                 case VALID_EXTERNAL_ORDERS -> list.add(checkValidExternalOrders(rule, ctx));
                 case NO_DUPLICATE_EXTERNAL_ORDER -> list.add(checkNoDuplicateRule(rule, ctx));
-                case RESERVATION_STATE, HELD_COUNT, WAITING_COUNT, RESOURCE_AVAILABILITY,
-                     QUEUE_ORDER, QUEUE_EMPTY, WORLD_RESTART_CONSISTENT, SINGLE_CAPACITY ->
-                        list.add(checkResourceRuleUnavailable(rule));
+                case RESERVATION_STATE -> list.add(checkReservationState(rule, ctx));
+                case HELD_COUNT -> list.add(checkReservationCount(rule, ctx, ReservationState.HELD));
+                case WAITING_COUNT -> list.add(checkReservationCount(rule, ctx, ReservationState.WAITING));
+                case RESOURCE_AVAILABILITY -> list.add(checkResourceAvailability(rule, ctx));
+                case QUEUE_ORDER -> list.add(checkQueueOrder(rule, ctx));
+                case QUEUE_EMPTY -> list.add(checkQueueEmpty(rule, ctx));
+                case WORLD_RESTART_CONSISTENT -> list.add(checkWorldRestartConsistent(rule, ctx));
+                case SINGLE_CAPACITY -> list.add(checkSingleCapacityRule(rule, ctx));
             }
         }
         return list;
@@ -300,16 +312,165 @@ public class InvariantOracle {
                         String.valueOf(want), String.valueOf(actual), "");
     }
 
-    /**
-     * Part B 的资源 EXPECT 在 PR4 只完成 parse 期校验；运行时检查器由 PR5/PR6 接线。
-     * 接线之前 fail-closed：宁可让运行失败，也不静默 PASS。
-     */
-    private OracleResult checkResourceRuleUnavailable(OracleRule rule) {
-        return OracleResult.fail(rule.oracleId(), rule.ruleType().name(), "SUPPORTED",
-                "RESOURCE_ORACLE_NOT_AVAILABLE", "resource oracle 在 PR5/PR6 接线");
+    // ---------- 场景 EXPECT（Part B 资源） ----------
+
+    private OracleResult checkReservationState(OracleRule rule, OracleContext ctx) {
+        String applicationId = rule.arguments().get(0);
+        String want = rule.arguments().get(1);
+        List<Reservation> matches = reservationsOf(ctx.resourceWorld(), applicationId);
+        if (matches.isEmpty()) {
+            return OracleResult.fail(rule.oracleId(), "RESERVATION_STATE", want, "MISSING",
+                    "no reservation for app=" + applicationId);
+        }
+        if (matches.size() > 1) {
+            return OracleResult.fail(rule.oracleId(), "RESERVATION_STATE", want, "DUPLICATE_RESERVATION",
+                    "app=" + applicationId + " entries=" + matches.size());
+        }
+        String actual = matches.get(0).state().name();
+        return want.equals(actual)
+                ? OracleResult.pass(rule.oracleId(), "RESERVATION_STATE", want, actual)
+                : OracleResult.fail(rule.oracleId(), "RESERVATION_STATE", want, actual, "");
     }
 
-    private OracleResult checkNoDuplicateRule(OracleRule rule, OracleContext ctx) {        int actual = confirmedOrdersOf(rule.arguments().get(0), ctx).size();
+    private OracleResult checkReservationCount(OracleRule rule, OracleContext ctx, ReservationState state) {
+        String resourceId = rule.arguments().get(0);
+        int want = Integer.parseInt(rule.arguments().get(1));
+        int actual = 0;
+        for (Reservation reservation : ctx.resourceWorld().reservations()) {
+            if (reservation.resourceId().equals(resourceId) && reservation.state() == state) {
+                actual++;
+            }
+        }
+        String ruleType = state == ReservationState.HELD ? "HELD_COUNT" : "WAITING_COUNT";
+        return want == actual
+                ? OracleResult.pass(rule.oracleId(), ruleType, String.valueOf(want), String.valueOf(actual))
+                : OracleResult.fail(rule.oracleId(), ruleType, String.valueOf(want),
+                        String.valueOf(actual), "resource=" + resourceId);
+    }
+
+    private OracleResult checkResourceAvailability(OracleRule rule, OracleContext ctx) {
+        String resourceId = rule.arguments().get(0);
+        String want = rule.arguments().get(1);
+        List<VirtualResource> matches = resourcesOf(ctx.resourceWorld(), resourceId);
+        if (matches.isEmpty()) {
+            return OracleResult.fail(rule.oracleId(), "RESOURCE_AVAILABILITY", want, "MISSING",
+                    "no resource " + resourceId);
+        }
+        if (matches.size() > 1) {
+            return OracleResult.fail(rule.oracleId(), "RESOURCE_AVAILABILITY", want, "DUPLICATE_RESOURCE",
+                    "resource=" + resourceId + " entries=" + matches.size());
+        }
+        String actual = matches.get(0).availability().name();
+        return want.equals(actual)
+                ? OracleResult.pass(rule.oracleId(), "RESOURCE_AVAILABILITY", want, actual)
+                : OracleResult.fail(rule.oracleId(), "RESOURCE_AVAILABILITY", want, actual, "");
+    }
+
+    private OracleResult checkQueueOrder(OracleRule rule, OracleContext ctx) {
+        String resourceId = rule.arguments().get(0);
+        List<String> want = rule.arguments().subList(1, rule.arguments().size());
+        List<String> actual = new ArrayList<>();
+        for (Reservation reservation : ctx.resourceWorld().reservations()) {
+            if (reservation.resourceId().equals(resourceId)
+                    && reservation.state() == ReservationState.WAITING) {
+                actual.add(reservation.applicationId());
+            }
+        }
+        if (want.equals(actual)) {
+            return OracleResult.pass(rule.oracleId(), "QUEUE_ORDER", String.join(",", want),
+                    String.join(",", actual));
+        }
+        return OracleResult.fail(rule.oracleId(), "QUEUE_ORDER", String.join(",", want),
+                actual.isEmpty() ? "EMPTY" : String.join(",", actual), "resource=" + resourceId);
+    }
+
+    private OracleResult checkQueueEmpty(OracleRule rule, OracleContext ctx) {
+        String resourceId = rule.arguments().get(0);
+        int waiting = 0;
+        for (Reservation reservation : ctx.resourceWorld().reservations()) {
+            if (reservation.resourceId().equals(resourceId)
+                    && reservation.state() == ReservationState.WAITING) {
+                waiting++;
+            }
+        }
+        return waiting == 0
+                ? OracleResult.pass(rule.oracleId(), "QUEUE_EMPTY", "0", "0")
+                : OracleResult.fail(rule.oracleId(), "QUEUE_EMPTY", "0", String.valueOf(waiting),
+                        "resource=" + resourceId);
+    }
+
+    private OracleResult checkWorldRestartConsistent(OracleRule rule, OracleContext ctx) {
+        List<RestartPair> pairs = ctx.restartPairs();
+        int mismatches = 0;
+        for (RestartPair pair : pairs) {
+            if (!pair.consistent()) {
+                mismatches++;
+            }
+        }
+        String actual = "restartPairs=" + pairs.size() + ",mismatches=" + mismatches;
+        String expected = "restartPairs>0,mismatches=0";
+        if (pairs.isEmpty()) {
+            return OracleResult.fail(rule.oracleId(), "WORLD_RESTART_CONSISTENT", expected, actual,
+                    "no WORLD_RESTART event");
+        }
+        return mismatches == 0
+                ? OracleResult.pass(rule.oracleId(), "WORLD_RESTART_CONSISTENT", expected, actual)
+                : OracleResult.fail(rule.oracleId(), "WORLD_RESTART_CONSISTENT", expected, actual,
+                        "restart digest mismatch");
+    }
+
+    /**
+     * 单容量：把运行中每个观察点的 HELD 数取最大值，真实判断是否越过 1。
+     */
+    private OracleResult checkSingleCapacityRule(OracleRule rule, OracleContext ctx) {
+        String resourceId = rule.arguments().get(0);
+        if (resourcesOf(ctx.resourceWorld(), resourceId).isEmpty()) {
+            return OracleResult.fail(rule.oracleId(), "SINGLE_CAPACITY", "<=1", "MISSING",
+                    "no resource " + resourceId);
+        }
+        int max = heldCount(ctx.resourceWorld(), resourceId);
+        for (ResourceStep step : ctx.resourceSteps()) {
+            max = Math.max(max, heldCount(step.after(), resourceId));
+        }
+        return max <= 1
+                ? OracleResult.pass(rule.oracleId(), "SINGLE_CAPACITY", "<=1", String.valueOf(max))
+                : OracleResult.fail(rule.oracleId(), "SINGLE_CAPACITY", "<=1", String.valueOf(max),
+                        "resource=" + resourceId + " 同时 HELD");
+    }
+
+    private static int heldCount(ResourceWorldSnapshot snapshot, String resourceId) {
+        int held = 0;
+        for (Reservation reservation : snapshot.reservations()) {
+            if (reservation.resourceId().equals(resourceId)
+                    && reservation.state() == ReservationState.HELD) {
+                held++;
+            }
+        }
+        return held;
+    }
+
+    private static List<Reservation> reservationsOf(ResourceWorldSnapshot snapshot, String applicationId) {
+        List<Reservation> matches = new ArrayList<>();
+        for (Reservation reservation : snapshot.reservations()) {
+            if (reservation.applicationId().equals(applicationId)) {
+                matches.add(reservation);
+            }
+        }
+        return matches;
+    }
+
+    private static List<VirtualResource> resourcesOf(ResourceWorldSnapshot snapshot, String resourceId) {
+        List<VirtualResource> matches = new ArrayList<>();
+        for (VirtualResource resource : snapshot.resources()) {
+            if (resource.resourceId().equals(resourceId)) {
+                matches.add(resource);
+            }
+        }
+        return matches;
+    }
+
+    private OracleResult checkNoDuplicateRule(OracleRule rule, OracleContext ctx) {
+        int actual = confirmedOrdersOf(rule.arguments().get(0), ctx).size();
         return actual <= 1
                 ? OracleResult.pass(rule.oracleId(), "NO_DUPLICATE_EXTERNAL_ORDER",
                         "<=1", String.valueOf(actual))

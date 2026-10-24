@@ -1,29 +1,32 @@
 #!/usr/bin/env bash
 #
-# 一键仿真验证脚本（PR3 / S4，28 步）。
+# 一键仿真验证脚本（PR5/PR6 / S6，资源运行时全量）。
 #
 # 从仓库根目录运行。任一步失败立即以非零退出，不输出 PASS，不吞结果。
 #
-# 28 步：
+# 步骤：
 #   01 仓库根自检          02 JDK 21 自检            03 定向清理四个目录
 #   04 源文件清单          05 编译 main              06 编译 test + major 65
 #   07 RegistryChecks=279  08 ConcurrencyChecks=8    09 ReliabilityR1=14
 #   10 30 个旧 case diff   11 Parser=16              12 Runtime=18
-#   13 ReplayEvidence=12   14 validate 合法场景×3    15 validate 非法场景×2
-#   16 run 非法场景×1      17 run SIM-001            18 run SIM-002
-#   19 run SIM-003         20 二次 run SIM-002       21 compare → MATCH
-#   22 5 个 manifest 校验  23 证据包 7 文件形状      24 21 字段顺序
-#   25 Evidence 安全扫描   26 README/docs 安全扫描   27 工作区+确定性
-#   28 唯一终点
+#   13 ResourceWorld=24    14 ResourceStorage=6      15 ResourceParser=7
+#   16 ResourceScenario=10 17 ReplayEvidence=12      18 validate 合法场景×3
+#   19 validate 非法场景×2 20 run 非法场景×1          21 run SIM-001
+#   22 run SIM-002         23 run SIM-003            24 二次 run SIM-002
+#   25 compare → MATCH     26 validate 资源场景×6    27 资源场景双跑×6 → 6 对 MATCH
+#   28 资源非法场景×5（退出 1 + 稳定 code + 首错停）  29 22 个 manifest 校验
+#   30 证据包 7 文件形状   31 21 字段顺序            32 Evidence 安全扫描
+#   33 README/docs 安全扫描                          34 工作区+确定性
+#   35 唯一终点
 #
 # 唯一终点：
-#   SIMULATION_R1_VERIFICATION_PASS originalCases=30 validScenarios=3 invalidScenarios=3 replay=1 evidenceBundles=5 realExternalWrites=0
+#   SIMULATION_RESOURCE_VERIFICATION_PASS originalCases=30 baseValidScenarios=3 baseInvalidScenarios=3 resourceValidScenarios=6 resourceInvalidScenarios=5 resourceReplay=6 realExternalWrites=0
 
 set -eu
 set -o pipefail
 
 STEP_NO=0
-STEP_TOTAL=28
+STEP_TOTAL=35
 
 step() {
     STEP_NO=$((STEP_NO + 1))
@@ -208,6 +211,46 @@ grep -qxF 'SIMULATION_RUNTIME_CASES_PASSED=18' build/test-temp/runtime.out.txt \
     || die "RUNTIME_CHECKS_LINE"
 grep -xF 'SIMULATION_RUNTIME_CASES_PASSED=18' build/test-temp/runtime.out.txt
 
+step "ResourceWorldChecks → RESOURCE_WORLD_CASES_PASSED=24"
+if ! java -cp "$TCP" lab.simulation.resource.ResourceWorldChecks > build/test-temp/resource-world.out.txt 2>&1; then
+    cat build/test-temp/resource-world.out.txt >&2
+    die "RESOURCE_WORLD_CHECKS_EXIT_NONZERO"
+fi
+[ "$(grep -c '^RW-[0-9][0-9] PASS$' build/test-temp/resource-world.out.txt || true)" -eq 24 ] \
+    || die "RESOURCE_WORLD_CHECKS_COUNT"
+grep -qxF 'RESOURCE_WORLD_CASES_PASSED=24' build/test-temp/resource-world.out.txt \
+    || die "RESOURCE_WORLD_CHECKS_LINE"
+grep -xF 'RESOURCE_WORLD_CASES_PASSED=24' build/test-temp/resource-world.out.txt
+
+step "ResourceStorageChecks → RESOURCE_STORAGE_CASES_PASSED=6"
+if ! java -cp "$TCP" lab.simulation.resource.ResourceStorageChecks > build/test-temp/resource-storage.out.txt 2>&1; then
+    cat build/test-temp/resource-storage.out.txt >&2
+    die "RESOURCE_STORAGE_CHECKS_EXIT_NONZERO"
+fi
+grep -qxF 'RESOURCE_STORAGE_CASES_PASSED=6' build/test-temp/resource-storage.out.txt \
+    || die "RESOURCE_STORAGE_CHECKS_LINE"
+grep -xF 'RESOURCE_STORAGE_CASES_PASSED=6' build/test-temp/resource-storage.out.txt
+
+step "ResourceParserChecks → RESOURCE_PARSER_CASES_PASSED=7"
+if ! java -cp "$TCP" lab.simulation.resource.ResourceParserChecks > build/test-temp/resource-parser.out.txt 2>&1; then
+    cat build/test-temp/resource-parser.out.txt >&2
+    die "RESOURCE_PARSER_CHECKS_EXIT_NONZERO"
+fi
+grep -qxF 'RESOURCE_PARSER_CASES_PASSED=7' build/test-temp/resource-parser.out.txt \
+    || die "RESOURCE_PARSER_CHECKS_LINE"
+grep -xF 'RESOURCE_PARSER_CASES_PASSED=7' build/test-temp/resource-parser.out.txt
+
+step "ResourceScenarioChecks → RESOURCE_SCENARIO_CASES_PASSED=10"
+if ! java -cp "$TCP" lab.simulation.resource.ResourceScenarioChecks > build/test-temp/resource-scenario.out.txt 2>&1; then
+    cat build/test-temp/resource-scenario.out.txt >&2
+    die "RESOURCE_SCENARIO_CHECKS_EXIT_NONZERO"
+fi
+[ "$(grep -c '^RSC-[0-9][0-9] PASS$' build/test-temp/resource-scenario.out.txt || true)" -eq 10 ] \
+    || die "RESOURCE_SCENARIO_CHECKS_COUNT"
+grep -qxF 'RESOURCE_SCENARIO_CASES_PASSED=10' build/test-temp/resource-scenario.out.txt \
+    || die "RESOURCE_SCENARIO_CHECKS_LINE"
+grep -xF 'RESOURCE_SCENARIO_CASES_PASSED=10' build/test-temp/resource-scenario.out.txt
+
 step "ReplayEvidenceChecks → REPLAY_EVIDENCE_R1_CASES_PASSED=12"
 if ! java -cp "$TCP" lab.simulation.ReplayEvidenceChecks > build/test-temp/replay.out.txt 2>&1; then
     cat build/test-temp/replay.out.txt >&2
@@ -316,8 +359,118 @@ grep -qxF 'REPLAY_MATCH SIM-002 version=1' build/test-temp/compare.out.txt \
     || die "COMPARE_NOT_MATCH"
 grep -xF 'REPLAY_MATCH SIM-002 version=1' build/test-temp/compare.out.txt
 
-step "5 个证据包逐一 sha256sum -c manifest.sha256"
-BUNDLES="build/runs/invalid-unscripted build/runs/sim-001-a build/runs/sim-002-a build/runs/sim-003-a build/runs/sim-002-b"
+step "validate 六个资源合法场景（exit 0）"
+RESOURCE_VALID=0
+for scenario in scenarios/resource/sim-101-single-hold-release.scenario \
+                scenarios/resource/sim-102-queue-order.scenario \
+                scenarios/resource/sim-103-queue-promotion.scenario \
+                scenarios/resource/sim-104-idempotent-request.scenario \
+                scenarios/resource/sim-105-disable-enable.scenario \
+                scenarios/resource/sim-106-restart-recovery.scenario; do
+    if ! java -cp "$CP" lab.simulation.SimulationMain validate "$scenario" \
+            > build/test-temp/validate-resource.out.txt 2>&1; then
+        cat build/test-temp/validate-resource.out.txt >&2
+        die "RESOURCE_VALID_SCENARIO_EXIT $scenario"
+    fi
+    grep -q '^SCENARIO_VALID ' build/test-temp/validate-resource.out.txt \
+        || die "RESOURCE_VALID_SCENARIO_OUTPUT $scenario"
+    RESOURCE_VALID=$((RESOURCE_VALID + 1))
+done
+[ "$RESOURCE_VALID" -eq 6 ] || die "RESOURCE_VALID_SCENARIO_COUNT $RESOURCE_VALID"
+echo "RESOURCE_VALID_SCENARIOS=$RESOURCE_VALID"
+
+step "六个资源场景各跑两次 → compare 6 对 REPLAY_MATCH"
+RESOURCE_REPLAY=0
+RESOURCE_BUNDLES=""
+run_resource_pair() {
+    local scenario="$1" id="$2" dir_a="$3" dir_b="$4" rc=0 dir
+    for dir in "$dir_a" "$dir_b"; do
+        if java -cp "$CP" lab.simulation.SimulationMain run "$scenario" "$dir" \
+                > build/test-temp/run-resource.out.txt 2>&1; then
+            rc=0
+        else
+            rc=$?
+        fi
+        [ "$rc" -eq 0 ] || die "RESOURCE_RUN_FAILED $scenario rc=$rc"
+        grep -q '^RUN_COMPLETED ' build/test-temp/run-resource.out.txt \
+            || die "RESOURCE_RUN_NOT_COMPLETED $scenario"
+        grep -qxF "EVIDENCE_WRITTEN $dir" build/test-temp/run-resource.out.txt \
+            || die "RESOURCE_RUN_EVIDENCE_MISSING $scenario"
+    done
+    if java -cp "$CP" lab.simulation.SimulationMain compare "$dir_a" "$dir_b" \
+            > build/test-temp/compare-resource.out.txt 2>&1; then
+        rc=0
+    else
+        rc=$?
+    fi
+    [ "$rc" -eq 0 ] || die "RESOURCE_COMPARE_EXIT $id rc=$rc"
+    grep -qxF "REPLAY_MATCH $id version=1" build/test-temp/compare-resource.out.txt \
+        || die "RESOURCE_COMPARE_NOT_MATCH $id"
+    grep -xF "REPLAY_MATCH $id version=1" build/test-temp/compare-resource.out.txt
+    RESOURCE_REPLAY=$((RESOURCE_REPLAY + 1))
+    RESOURCE_BUNDLES="$RESOURCE_BUNDLES $dir_a $dir_b"
+}
+run_resource_pair scenarios/resource/sim-101-single-hold-release.scenario SIM-101 \
+    build/runs/res-101-a build/runs/res-101-b
+run_resource_pair scenarios/resource/sim-102-queue-order.scenario SIM-102 \
+    build/runs/res-102-a build/runs/res-102-b
+run_resource_pair scenarios/resource/sim-103-queue-promotion.scenario SIM-103 \
+    build/runs/res-103-a build/runs/res-103-b
+run_resource_pair scenarios/resource/sim-104-idempotent-request.scenario SIM-104 \
+    build/runs/res-104-a build/runs/res-104-b
+run_resource_pair scenarios/resource/sim-105-disable-enable.scenario SIM-105 \
+    build/runs/res-105-a build/runs/res-105-b
+run_resource_pair scenarios/resource/sim-106-restart-recovery.scenario SIM-106 \
+    build/runs/res-106-a build/runs/res-106-b
+[ "$RESOURCE_REPLAY" -eq 6 ] || die "RESOURCE_REPLAY_COUNT $RESOURCE_REPLAY"
+echo "RESOURCE_REPLAY=$RESOURCE_REPLAY"
+
+step "五个资源非法场景（exit 1 + 稳定 code + 首错停止）"
+RESOURCE_INVALID=0
+RESOURCE_INVALID_BUNDLES=""
+check_resource_invalid() {
+    local scenario="$1" id="$2" code="$3" dir="$4" rc=0
+    rm -rf "$dir"
+    if java -cp "$CP" lab.simulation.SimulationMain run "$scenario" "$dir" \
+            > build/test-temp/run-resource-invalid.out.txt 2>&1; then
+        rc=0
+    else
+        rc=$?
+    fi
+    [ "$rc" -eq 1 ] || die "RESOURCE_INVALID_EXIT $id rc=$rc"
+    grep -qxF "RUN_FAILED $id $code" build/test-temp/run-resource-invalid.out.txt \
+        || die "RESOURCE_INVALID_CODE $id expect=$code"
+    grep -qxF "EVIDENCE_WRITTEN $dir" build/test-temp/run-resource-invalid.out.txt \
+        || die "RESOURCE_INVALID_EVIDENCE $id"
+    [ -d "$dir" ] || die "RESOURCE_INVALID_DIR $id"
+    if ! ( cd "$dir" && sha256sum -c manifest.sha256 > /dev/null 2>&1 ); then
+        die "RESOURCE_INVALID_MANIFEST $id"
+    fi
+    awk -F'\t' -v code="$code" '
+        NR == 1 { next }
+        !seen && $5 == "EVENT_FAIL" { seen = 1; if (index($7, code) != 1) bad = 1; next }
+        seen { if ($5 != "EVENT_SKIPPED") bad = 1; skipped++ }
+        END { exit (!(seen && bad == 0 && skipped > 0)) }
+    ' "$dir/event-timeline.tsv" || die "RESOURCE_INVALID_FIRST_FAIL_STOP $id"
+    head -n 1 build/test-temp/run-resource-invalid.out.txt
+    RESOURCE_INVALID=$((RESOURCE_INVALID + 1))
+    RESOURCE_INVALID_BUNDLES="$RESOURCE_INVALID_BUNDLES $dir"
+}
+check_resource_invalid scenarios/resource/invalid/sim-invalid-101-missing-destination.scenario \
+    SIM-INVALID-101 RESOURCE_TARGET_MISMATCH build/runs/res-invalid-101
+check_resource_invalid scenarios/resource/invalid/sim-invalid-102-missing-point.scenario \
+    SIM-INVALID-102 UNKNOWN_POINT build/runs/res-invalid-102
+check_resource_invalid scenarios/resource/invalid/sim-invalid-103-conflict.scenario \
+    SIM-INVALID-103 RESERVATION_CONFLICT build/runs/res-invalid-103
+check_resource_invalid scenarios/resource/invalid/sim-invalid-104-terminal-reopen.scenario \
+    SIM-INVALID-104 RESERVATION_TERMINAL build/runs/res-invalid-104
+check_resource_invalid scenarios/resource/invalid/sim-invalid-105-reference-mismatch.scenario \
+    SIM-INVALID-105 RESOURCE_TARGET_MISMATCH build/runs/res-invalid-105
+[ "$RESOURCE_INVALID" -eq 5 ] || die "RESOURCE_INVALID_COUNT $RESOURCE_INVALID"
+echo "RESOURCE_INVALID_SCENARIOS=$RESOURCE_INVALID"
+
+step "22 个证据包逐一 sha256sum -c manifest.sha256"
+BUNDLES="build/runs/invalid-unscripted build/runs/sim-001-a build/runs/sim-002-a build/runs/sim-003-a build/runs/sim-002-b$RESOURCE_BUNDLES$RESOURCE_INVALID_BUNDLES"
 BUNDLE_COUNT=0
 for bundle in $BUNDLES; do
     [ -d "$bundle" ] || die "BUNDLE_MISSING $bundle"
@@ -327,8 +480,8 @@ for bundle in $BUNDLES; do
     fi
     BUNDLE_COUNT=$((BUNDLE_COUNT + 1))
 done
-[ "$BUNDLE_COUNT" -eq 5 ] || die "BUNDLE_COUNT $BUNDLE_COUNT"
-echo "EVIDENCE_BUNDLES=$BUNDLE_COUNT"
+[ "$BUNDLE_COUNT" -eq 22 ] || die "BUNDLE_COUNT $BUNDLE_COUNT"
+echo "BASE_EVIDENCE_BUNDLES=5 RESOURCE_EVIDENCE_BUNDLES=17 EVIDENCE_BUNDLES=$BUNDLE_COUNT"
 
 step "证据包形状：恰好 7 个文件 / manifest 恰好 6 行"
 EXPECTED_FILES="$(printf '%s\n' event-timeline.tsv external-interactions.tsv manifest.sha256 \
@@ -449,9 +602,16 @@ for bundle in $BUNDLES; do
     awk -F'\t' '$1 == "ORC-SYS-005" { found = 1; if ($4 != "LOCAL_SIMULATION") { found = 0 } }
                  END { exit (found ? 0 : 1) }' "$bundle/oracle-results.tsv" \
         || die "ORC_SYS_005_NOT_LOCAL $bundle"
+    awk -F'\t' '$1 == "ORC-RES-SYS-006" {
+                     found = 1
+                     if ($3 != "PASS") { found = 0 }
+                     if ($5 !~ /^restartPairs=[0-9]+,mismatches=[0-9]+$/) { found = 0 }
+                 }
+                 END { exit (found ? 0 : 1) }' "$bundle/oracle-results.tsv" \
+        || die "ORC_RES_SYS_006_NOT_PASS_OR_FORMAT $bundle"
 done
 [ "$REAL_WRITES" -eq 0 ] || die "REAL_EXTERNAL_WRITES $REAL_WRITES"
-[ "$BUNDLE_COUNT" -eq 5 ] || die "EVIDENCE_BUNDLES $BUNDLE_COUNT"
+[ "$BUNDLE_COUNT" -eq 22 ] || die "EVIDENCE_BUNDLES $BUNDLE_COUNT"
 
-printf 'SIMULATION_R1_VERIFICATION_PASS originalCases=%d validScenarios=%d invalidScenarios=%d replay=%d evidenceBundles=%d realExternalWrites=%d\n' \
-    "$CASES_PASSED" "$VALID_SCENARIOS" $((INVALID_PARSE + 1)) 1 "$BUNDLE_COUNT" "$REAL_WRITES"
+printf 'SIMULATION_RESOURCE_VERIFICATION_PASS originalCases=%d baseValidScenarios=%d baseInvalidScenarios=%d resourceValidScenarios=%d resourceInvalidScenarios=%d resourceReplay=%d realExternalWrites=%d\n' \
+    "$CASES_PASSED" "$VALID_SCENARIOS" $((INVALID_PARSE + 1)) "$RESOURCE_VALID" "$RESOURCE_INVALID" "$RESOURCE_REPLAY" "$REAL_WRITES"
