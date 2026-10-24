@@ -570,8 +570,9 @@ public final class ReliabilityCloseoutChecks {
 
                 require(readOnly.loadPoints().size() == 1,
                         "只读实例读到 points=" + readOnly.loadPoints().size() + " 期望=1");
-                require(readOnly.currentVersion() == 2,
-                        "只读实例 currentVersion=" + readOnly.currentVersion() + " 期望=2");
+                // PR4 / D-13：SQLite 新增 Migration 3（资源表），基线版本由 2 前进到 3。
+                require(readOnly.currentVersion() == 3,
+                        "只读实例 currentVersion=" + readOnly.currentVersion() + " 期望=3");
             }
 
             // ⑤ close 之后：bytes+size+mtime+sidecar 全部不变

@@ -1227,7 +1227,7 @@ check(h.outboxUncertain() == 1, "R73 outbox uncertain 1");
         java.nio.file.Path tmp = java.nio.file.Files.createTempDirectory("ids-migration-r81");
         try {
             SqliteStorage s = new SqliteStorage(tmp.resolve("db.sqlite"));
-            check(s.currentVersion() == 2, "R81 fresh db version 2");
+            check(s.currentVersion() == 3, "R81 fresh db version 3");
         } finally {
             deleteRecursively(tmp);
         }
@@ -1239,10 +1239,10 @@ check(h.outboxUncertain() == 1, "R73 outbox uncertain 1");
             java.nio.file.Path db = tmp.resolve("db.sqlite");
 
             SqliteStorage s1 = new SqliteStorage(db);
-            check(s1.currentVersion() == 2, "R82 first open version 2");
+            check(s1.currentVersion() == 3, "R82 first open version 3");
 
             SqliteStorage s2 = new SqliteStorage(db);
-            check(s2.currentVersion() == 2, "R82 second open still version 2");
+            check(s2.currentVersion() == 3, "R82 second open still version 3");
         } finally {
             deleteRecursively(tmp);
         }
@@ -1260,7 +1260,7 @@ check(h.outboxUncertain() == 1, "R73 outbox uncertain 1");
             SqliteStorage s2 = new SqliteStorage(db);
             Registry r2 = new Registry(s2, new FakeRcsAdapter(FakeRcsAdapter.Mode.ACCEPT));
             check(r2.listPoints().size() == 1, "R83 data preserved after reopen");
-            check(s2.currentVersion() == 2, "R83 version still 2");
+            check(s2.currentVersion() == 3, "R83 version still 3");
         } finally {
             deleteRecursively(tmp);
         }
@@ -1272,9 +1272,9 @@ check(h.outboxUncertain() == 1, "R73 outbox uncertain 1");
         check(r.migrationVersion() == -1, "R84 memory storage unsupported");
 
         java.util.List<Migration> list = r.migrationList();
-        check(list.size() == 2, "R84 migration list size 2");
+        check(list.size() == 3, "R84 migration list size 3");
         check(list.get(0).version() == 1, "R84 first version 1");
-        check(list.get(1).version() == 2, "R84 second version 2");
+        check(list.get(1).version() == 2 && list.get(2).version() == 3, "R84 second/third versions 2/3");
     }
 
     private static void r85() throws Exception {
@@ -1282,7 +1282,7 @@ check(h.outboxUncertain() == 1, "R73 outbox uncertain 1");
         try {
             java.nio.file.Path db = tmp.resolve("db.sqlite");
             SqliteStorage s = new SqliteStorage(db);
-            check(s.currentVersion() == 2, "R85 version 2");
+            check(s.currentVersion() == 3, "R85 version 3");
 
             Registry r = new Registry(s, new FakeRcsAdapter(FakeRcsAdapter.Mode.ACCEPT));
             r.registerPoint("P01", "原料暂存点");

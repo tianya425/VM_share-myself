@@ -130,7 +130,7 @@
 
 ### Part B 门禁
 
-`GATE-A=NOT_READY` 期间，Part B（`lab.simulation.resource.*`：资源域、资源运行时、6 个资源场景、6 项资源变异）不得开始。该阻断属于门禁，不登记为开放项，解除条件为独立复核给出 `GATE-A=PASS`。
+`GATE-A=PASS`（2026-10-24，自复核 D-11）已解除该阻断：PR4 资源领域模型（`lab.simulation.resource` 九个领域类、三类存储、Parser 8 Action / 8 EXPECT）已接线；资源运行时、6 个资源场景、6 项资源变异仍属 PR5/PR6 未完成范围，不登记为开放项。
 
 ## 变更记录
 

@@ -27,6 +27,6 @@ public class MemoryStorage implements Storage {
 
     private static RegistryState deepCopy(RegistryState state) {
         return new RegistryState(state.points(), state.applications(), state.outbox(),
-                state.inbox(), state.workflows());
+                state.inbox(), state.workflows(), state.resourceWorld());
     }
 }

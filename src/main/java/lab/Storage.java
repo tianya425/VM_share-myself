@@ -55,30 +55,30 @@ public interface Storage {
     default void savePoints(List<Point> points) {
         RegistryState current = loadState();
         commitState(new RegistryState(points, current.applications(), current.outbox(),
-                current.inbox(), current.workflows()));
+                current.inbox(), current.workflows(), current.resourceWorld()));
     }
 
     default void saveApplications(List<TransferApplication> applications) {
         RegistryState current = loadState();
         commitState(new RegistryState(current.points(), applications, current.outbox(),
-                current.inbox(), current.workflows()));
+                current.inbox(), current.workflows(), current.resourceWorld()));
     }
 
     default void saveOutbox(List<OutboxEntry> outbox) {
         RegistryState current = loadState();
         commitState(new RegistryState(current.points(), current.applications(), outbox,
-                current.inbox(), current.workflows()));
+                current.inbox(), current.workflows(), current.resourceWorld()));
     }
 
     default void saveInbox(List<InboxEntry> inbox) {
         RegistryState current = loadState();
         commitState(new RegistryState(current.points(), current.applications(), current.outbox(),
-                inbox, current.workflows()));
+                inbox, current.workflows(), current.resourceWorld()));
     }
 
     default void saveWorkflows(List<WorkflowInstance> workflows) {
         RegistryState current = loadState();
         commitState(new RegistryState(current.points(), current.applications(), current.outbox(),
-                current.inbox(), workflows));
+                current.inbox(), workflows, current.resourceWorld()));
     }
 }

@@ -281,8 +281,8 @@
 - 不连接真实 M4、AGV、线边仓、PLC、MES、上位机或数据库；不实现真实 M4 字段合同。
 - 不用网络请求替代本地 Fake；不用真实 `Thread.sleep` 等待逻辑时间；不以系统当前时间决定业务结论。
 - 不产生任何真实外部写：`realExternalWrites=0`。
-- `GATE-A=PASS` 之前不写 `lab.simulation.resource.*`（Part B 未开始）。
-- 不修改 `cases/*.expected.txt`；不用 `catch (Exception ignored)` 吞错。
+- Part B 资源领域模型已接线（PR4：`lab.simulation.resource` 九个领域类 + 资源存储 + 8 个 Action / 8 个 EXPECT 的 parse 期校验）；资源运行时与资源场景未开始（PR5/PR6）。
+- 不修改 `cases/*.expected.txt`（唯一例外见 `docs/delivery-verification.md` 的 D-13：SQLite Migration 3 导致的两个 migration golden 版本行同步）；不用 `catch (Exception ignored)` 吞错。
 - 不声称 `M4_CONTRACT_PASS`、`VERIFIED_LAB`、`SITE_PASS`、`PRODUCTION_READY`、`CAPACITY_PASS`。
 
 ## 文档

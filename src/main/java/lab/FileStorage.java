@@ -1,5 +1,13 @@
 package lab;
 
+import lab.simulation.resource.Destination;
+import lab.simulation.resource.Reservation;
+import lab.simulation.resource.ReservationState;
+import lab.simulation.resource.ResourceAvailability;
+import lab.simulation.resource.ResourceWorldSnapshot;
+import lab.simulation.resource.ServicePoint;
+import lab.simulation.resource.VirtualResource;
+
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.Writer;
@@ -35,6 +43,7 @@ public class FileStorage implements Storage {
     private final Path outboxFile;
     private final Path inboxFile;
     private final Path workflowsFile;
+    private final Path resourcesFile;
 
     public FileStorage(Path dataDir) {
         try {
@@ -48,6 +57,7 @@ public class FileStorage implements Storage {
         this.outboxFile = dataDir.resolve("outbox.txt");
         this.inboxFile = dataDir.resolve("inbox.txt");
         this.workflowsFile = dataDir.resolve("workflows.txt");
+        this.resourcesFile = dataDir.resolve("resources.txt");
     }
 
     @Override
@@ -57,7 +67,8 @@ public class FileStorage implements Storage {
                 readApplications(),
                 readOutbox(),
                 readInbox(),
-                readWorkflows());
+                readWorkflows(),
+                readResourceWorld());
     }
 
     @Override
@@ -69,12 +80,14 @@ public class FileStorage implements Storage {
             stagingFiles.add(writeStaging(outboxFile, formatOutbox(next.outbox())));
             stagingFiles.add(writeStaging(inboxFile, formatInbox(next.inbox())));
             stagingFiles.add(writeStaging(workflowsFile, formatWorkflows(next.workflows())));
+            stagingFiles.add(writeStaging(resourcesFile, formatResourceWorld(next.resourceWorld())));
 
             moveIntoPlace(pointsFile, stagingFiles.get(0));
             moveIntoPlace(applicationsFile, stagingFiles.get(1));
             moveIntoPlace(outboxFile, stagingFiles.get(2));
             moveIntoPlace(inboxFile, stagingFiles.get(3));
             moveIntoPlace(workflowsFile, stagingFiles.get(4));
+            moveIntoPlace(resourcesFile, stagingFiles.get(5));
         } catch (IOException e) {
             for (Path staging : stagingFiles) {
                 try {
@@ -175,6 +188,36 @@ public class FileStorage implements Storage {
                     .append(wf.state().name()).append('|')
                     .append(wf.currentStepIndex()).append('|')
                     .append(steps).append('\n');
+        }
+        return builder.toString();
+    }
+
+    private static String formatResourceWorld(ResourceWorldSnapshot world) {
+        StringBuilder builder = new StringBuilder();
+        for (Destination destination : world.destinations()) {
+            builder.append("D|").append(destination.destinationId()).append('|')
+                    .append(destination.name()).append('\n');
+        }
+        for (ServicePoint servicePoint : world.servicePoints()) {
+            builder.append("S|").append(servicePoint.servicePointId()).append('|')
+                    .append(servicePoint.destinationId()).append('|')
+                    .append(servicePoint.registryPointId()).append('|')
+                    .append(servicePoint.name()).append('\n');
+        }
+        for (VirtualResource resource : world.resources()) {
+            builder.append("R|").append(resource.resourceId()).append('|')
+                    .append(resource.servicePointId()).append('|')
+                    .append(resource.availability().name()).append('\n');
+        }
+        for (Reservation reservation : world.reservations()) {
+            builder.append("V|").append(reservation.reservationId()).append('|')
+                    .append(reservation.applicationId()).append('|')
+                    .append(reservation.destinationId()).append('|')
+                    .append(reservation.servicePointId()).append('|')
+                    .append(reservation.resourceId()).append('|')
+                    .append(reservation.state().name()).append('|')
+                    .append(reservation.offsetMillis()).append('|')
+                    .append(reservation.logicalSequence()).append('\n');
         }
         return builder.toString();
     }
@@ -294,6 +337,75 @@ public class FileStorage implements Storage {
                     currentStepIndex, List.copyOf(steps)));
         }
         return result;
+    }
+
+    /**
+     * 读资源世界。格式不合法时 fail-closed：抛异常而不是静默丢行，
+     * 避免"读回一个缺少 holder / 目的地的世界"。
+     */
+    private ResourceWorldSnapshot readResourceWorld() {
+        List<Destination> destinations = new ArrayList<>();
+        List<ServicePoint> servicePoints = new ArrayList<>();
+        List<VirtualResource> resources = new ArrayList<>();
+        List<Reservation> reservations = new ArrayList<>();
+        for (String[] parts : readLines(resourcesFile)) {
+            switch (parts[0]) {
+                case "D" -> {
+                    requireFields(parts, 3, "D");
+                    destinations.add(new Destination(parts[1], parts[2]));
+                }
+                case "S" -> {
+                    requireFields(parts, 5, "S");
+                    servicePoints.add(new ServicePoint(parts[1], parts[2], parts[3], parts[4]));
+                }
+                case "R" -> {
+                    requireFields(parts, 4, "R");
+                    resources.add(new VirtualResource(parts[1], parts[2],
+                            parseAvailability(parts[3])));
+                }
+                case "V" -> {
+                    requireFields(parts, 9, "V");
+                    reservations.add(new Reservation(parts[1], parts[2], parts[3], parts[4], parts[5],
+                            parseReservationState(parts[6]),
+                            parseLong(parts[7], "offsetMillis"),
+                            parseLong(parts[8], "logicalSequence")));
+                }
+                default -> throw new RuntimeException(
+                        "cannot read resource world: unknown record " + parts[0]);
+            }
+        }
+        return new ResourceWorldSnapshot(destinations, servicePoints, resources, reservations);
+    }
+
+    private static void requireFields(String[] parts, int expected, String record) {
+        if (parts.length != expected) {
+            throw new RuntimeException("cannot read resource world: " + record
+                    + " fields=" + parts.length + " expected=" + expected);
+        }
+    }
+
+    private static ResourceAvailability parseAvailability(String value) {
+        try {
+            return ResourceAvailability.valueOf(value);
+        } catch (IllegalArgumentException e) {
+            throw new RuntimeException("cannot read resource world: availability=" + value, e);
+        }
+    }
+
+    private static ReservationState parseReservationState(String value) {
+        try {
+            return ReservationState.valueOf(value);
+        } catch (IllegalArgumentException e) {
+            throw new RuntimeException("cannot read resource world: state=" + value, e);
+        }
+    }
+
+    private static long parseLong(String value, String field) {
+        try {
+            return Long.parseLong(value);
+        } catch (NumberFormatException e) {
+            throw new RuntimeException("cannot read resource world: " + field + "=" + value, e);
+        }
     }
 
     /**

@@ -1,4 +1,4 @@
-MIGRATION status version=2
+MIGRATION status version=3
 POINTS 2
 POINT P01 原料暂存点
 POINT P02 装配线接收点

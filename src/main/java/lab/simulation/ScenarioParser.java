@@ -51,6 +51,10 @@ public class ScenarioParser {
             "ACCEPTED",
             "NOT_FOUND");
 
+    /** Part B：资源动作 / 期望里的枚举取值。 */
+    private static final Set<String> RESOURCE_AVAILABILITIES = Set.of("ENABLED", "DISABLED");
+    private static final Set<String> RESERVATION_STATES = Set.of("HELD", "WAITING", "RELEASED", "CANCELLED");
+
     /**
      * 解析并校验场景文件。
      */
@@ -383,6 +387,14 @@ public class ScenarioParser {
             case OUTBOX_PROCESS -> 0;
             case WORKFLOW_START -> 1;
             case WORKFLOW_ADVANCE -> 1;
+            case DESTINATION_ADD -> 2;
+            case SERVICE_POINT_ADD -> 4;
+            case VIRTUAL_RESOURCE_ADD -> 2;
+            case RESOURCE_SET -> 2;
+            case RESERVATION_REQUEST -> 4;
+            case RESERVATION_RELEASE -> 1;
+            case RESERVATION_CANCEL -> 1;
+            case WORLD_RESTART -> 0;
         };
         if (args.size() != need) {
             throw new ScenarioValidationException("SCENARIO_ARGUMENT_COUNT", action.name());
@@ -391,29 +403,57 @@ public class ScenarioParser {
                 && !CALLBACK_EVENT_TYPES.contains(args.get(1))) {
             throw new ScenarioValidationException("SCENARIO_UNKNOWN_ACTION", args.get(1));
         }
+        if (action == ScenarioEvent.Action.RESOURCE_SET
+                && !RESOURCE_AVAILABILITIES.contains(args.get(1))) {
+            throw new ScenarioValidationException("SCENARIO_ARGUMENT_VALUE", "RESOURCE_SET=" + args.get(1));
+        }
     }
 
     /**
-     * EXPECT 的参数数量与 COUNT 取值在 parse 期校验：
-     * COUNT 必须是非负整数（且不超过 int 范围），禁止留到 Oracle 运行时 parseInt。
+     * EXPECT 的参数数量与取值在 parse 期校验：
+     * COUNT 必须是非负整数（且不超过 int 范围），枚举必须是声明集合里的值，
+     * 禁止留到 Oracle 运行时 parseInt / valueOf。
      */
     private static void checkOracleArgs(OracleRule.RuleType type, List<String> args) {
-        int need = switch (type) {
-            case APPLICATION_STATE -> 2;
-            case OUTBOX_STATUS -> 2;
-            case CREATE_CALLS -> 2;
-            case QUERY_CALLS -> 2;
-            case VALID_EXTERNAL_ORDERS -> 2;
-            case NO_DUPLICATE_EXTERNAL_ORDER -> 1;
-        };
-        if (args.size() != need) {
-            throw new ScenarioValidationException("SCENARIO_ARGUMENT_COUNT", type.name());
+        if (type == OracleRule.RuleType.QUEUE_ORDER) {
+            if (args.size() < 2) {
+                throw new ScenarioValidationException("SCENARIO_ARGUMENT_COUNT", type.name());
+            }
+        } else {
+            int need = switch (type) {
+                case APPLICATION_STATE -> 2;
+                case OUTBOX_STATUS -> 2;
+                case CREATE_CALLS -> 2;
+                case QUERY_CALLS -> 2;
+                case VALID_EXTERNAL_ORDERS -> 2;
+                case NO_DUPLICATE_EXTERNAL_ORDER -> 1;
+                case RESERVATION_STATE -> 2;
+                case HELD_COUNT -> 2;
+                case WAITING_COUNT -> 2;
+                case RESOURCE_AVAILABILITY -> 2;
+                case QUEUE_EMPTY -> 1;
+                case WORLD_RESTART_CONSISTENT -> 0;
+                case SINGLE_CAPACITY -> 1;
+                case QUEUE_ORDER -> throw new IllegalStateException("QUEUE_ORDER 已单独处理");
+            };
+            if (args.size() != need) {
+                throw new ScenarioValidationException("SCENARIO_ARGUMENT_COUNT", type.name());
+            }
         }
         switch (type) {
-            case CREATE_CALLS, QUERY_CALLS, VALID_EXTERNAL_ORDERS -> checkCount(type.name(), args.get(1));
+            case CREATE_CALLS, QUERY_CALLS, VALID_EXTERNAL_ORDERS, HELD_COUNT, WAITING_COUNT ->
+                    checkCount(type.name(), args.get(1));
+            case RESERVATION_STATE -> checkEnum(type.name(), args.get(1), RESERVATION_STATES);
+            case RESOURCE_AVAILABILITY -> checkEnum(type.name(), args.get(1), RESOURCE_AVAILABILITIES);
             default -> {
-                // 其余类型的第二个参数是状态名，不在 parse 期做集合校验
+                // 其余类型的参数不做集合校验
             }
+        }
+    }
+
+    private static void checkEnum(String detail, String value, Set<String> allowed) {
+        if (!allowed.contains(value)) {
+            throw new ScenarioValidationException("SCENARIO_ARGUMENT_VALUE", detail + "=" + value);
         }
     }
 
