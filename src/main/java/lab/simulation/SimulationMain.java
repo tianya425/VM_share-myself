@@ -115,6 +115,10 @@ public class SimulationMain {
             out.println("RUN_INCONCLUSIVE " + result.scenarioId() + " EVIDENCE_WRITE_FAILED");
             System.exit(3);
             return;
+        } catch (EvidenceValidationException e) {
+            out.println("RUN_INCONCLUSIVE " + result.scenarioId() + " " + e.code());
+            System.exit(3);
+            return;
         }
 
         if (SimulationRunResult.COMPLETED.equals(result.runStatus())) {
@@ -143,10 +147,8 @@ public class SimulationMain {
 
     private static void compare(PrintWriter out, Path dirA, Path dirB) {
         ReplayComparator comparator = new ReplayComparator();
-        String result = comparator.compare(dirA, dirB);
-        out.println(result);
-        if (!result.startsWith("REPLAY_MATCH")) {
-            System.exit(1);
-        }
+        ReplayResult result = comparator.compare(dirA, dirB);
+        out.println(result.toLine());
+        System.exit(result.exitCode());
     }
 }

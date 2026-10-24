@@ -4,129 +4,96 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.security.MessageDigest;
-import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 
 /**
- * 比较两次仿真运行的证据目录。
+ * 比较两次仿真运行的证据目录（PR2b/T3）。
  *
  * <p>规则：
  * <ol>
- *   <li>校验两个目录的 manifest</li>
- *   <li>校验 scenarioDigest 相同</li>
- *   <li>比较 run-summary、event-timeline、external-interactions、oracle-results</li>
- *   <li>全部相同 → REPLAY_MATCH</li>
- *   <li>任一不同 → REPLAY_DIFFERENT + 首个差异文件</li>
- *   <li>manifest 缺失或错误 → REPLAY_INVALID_EVIDENCE</li>
+ *   <li>先校验 A、再校验 B；任一侧非法 → {@code REPLAY_INVALID_EVIDENCE A|B:<code>}</li>
+ *   <li>比较场景摘要（scenarioDigest）；不同 → {@code REPLAY_DIFFERENT scenario.scenario}</li>
+ *   <li>逐字节比较 scenario.scenario / run-summary.txt / event-timeline.tsv /
+ *       external-interactions.tsv / oracle-results.tsv，首个不同 → {@code REPLAY_DIFFERENT <file>}</li>
+ *   <li>全部相同 → {@code REPLAY_MATCH <scenarioId> version=<n>}</li>
  * </ol>
  *
  * <p>目录路径本身不参与比较。
  */
 public class ReplayComparator {
 
+    /** 逐字节比较顺序（首个不同即为结果）。 */
     private static final List<String> COMPARE_FILES = List.of(
+            "scenario.scenario",
+            "run-summary.txt",
             "event-timeline.tsv",
             "external-interactions.tsv",
-            "oracle-results.tsv",
-            "run-summary.txt");
+            "oracle-results.tsv");
+
+    private final EvidenceBundleValidator validator = new EvidenceBundleValidator();
 
     /**
      * 比较两个证据目录。
-     *
-     * @return 结果码：
-     *         REPLAY_MATCH / REPLAY_DIFFERENT / REPLAY_INVALID_EVIDENCE
      */
-    public String compare(Path dirA, Path dirB) {
-        // 1. 校验 manifest
-        if (!verifyManifest(dirA) || !verifyManifest(dirB)) {
-            return "REPLAY_INVALID_EVIDENCE";
+    public ReplayResult compare(Path dirA, Path dirB) {
+        String digestA;
+        try {
+            digestA = validator.validateAndDigest(dirA);
+        } catch (EvidenceValidationException e) {
+            return invalid("A:" + e.code());
+        }
+        String digestB;
+        try {
+            digestB = validator.validateAndDigest(dirB);
+        } catch (EvidenceValidationException e) {
+            return invalid("B:" + e.code());
         }
 
-        // 2. scenarioDigest 相同
-        String digestA = readDigest(dirA);
-        String digestB = readDigest(dirB);
-        if (digestA == null || digestB == null || !digestA.equals(digestB)) {
-            return "REPLAY_INVALID_EVIDENCE";
+        if (!digestA.equals(digestB)) {
+            return different("scenario.scenario");
         }
-
-        // 3. 逐文件比较
-        for (String name : COMPARE_FILES) {
-            String a = readFile(dirA, name);
-            String b = readFile(dirB, name);
-            if (a == null || b == null) {
-                return "REPLAY_INVALID_EVIDENCE";
-            }
-            if (!a.equals(b)) {
-                return "REPLAY_DIFFERENT " + name;
+        for (String fileName : COMPARE_FILES) {
+            if (!sameBytes(dirA.resolve(fileName), dirB.resolve(fileName))) {
+                return different(fileName);
             }
         }
 
-        return "REPLAY_MATCH";
+        List<String> summary = readLines(dirA.resolve("run-summary.txt"));
+        String scenarioId = field(summary, "scenarioId");
+        int version = Integer.parseInt(field(summary, "scenarioVersion"));
+        return new ReplayResult(ReplayResult.MATCH, scenarioId, version, "");
     }
 
-    // ---------- 内部 ----------
+    private ReplayResult invalid(String detail) {
+        return new ReplayResult(ReplayResult.INVALID, "", 0, detail);
+    }
 
-    private boolean verifyManifest(Path dir) {
-        Path manifest = dir.resolve("manifest.sha256");
-        if (!Files.exists(manifest)) {
-            return false;
-        }
+    private ReplayResult different(String fileName) {
+        return new ReplayResult(ReplayResult.DIFFERENT, "", 0, fileName);
+    }
+
+    private boolean sameBytes(Path a, Path b) {
         try {
-            List<String> lines = Files.readAllLines(manifest, StandardCharsets.UTF_8);
-            for (String line : lines) {
-                if (line.isEmpty()) {
-                    continue;
-                }
-                String[] parts = line.split("\\s+");
-                if (parts.length != 2) {
-                    return false;
-                }
-                String expected = parts[0];
-                String name = parts[1];
-                Path file = dir.resolve(name);
-                if (!Files.exists(file)) {
-                    return false;
-                }
-                byte[] bytes = Files.readAllBytes(file);
-                if (!sha256(bytes).equals(expected)) {
-                    return false;
-                }
-            }
-            return true;
+            return java.util.Arrays.equals(Files.readAllBytes(a), Files.readAllBytes(b));
         } catch (IOException e) {
             return false;
         }
     }
 
-    private String readDigest(Path dir) {
-        return readFile(dir, "scenario.sha256");
-    }
-
-    private String readFile(Path dir, String name) {
-        Path file = dir.resolve(name);
-        if (!Files.exists(file)) {
-            return null;
-        }
+    private List<String> readLines(Path file) {
         try {
-            return Files.readString(file, StandardCharsets.UTF_8);
+            return Files.readAllLines(file, StandardCharsets.UTF_8);
         } catch (IOException e) {
-            return null;
+            throw new EvidenceValidationException("EVIDENCE_FILE_NOT_REGULAR", file.getFileName().toString());
         }
     }
 
-    private static String sha256(byte[] data) {
-        try {
-            MessageDigest md = MessageDigest.getInstance("SHA-256");
-            byte[] digest = md.digest(data);
-            StringBuilder sb = new StringBuilder();
-            for (byte b : digest) {
-                sb.append(String.format("%02x", b));
+    private String field(List<String> summary, String key) {
+        for (String line : summary) {
+            if (line.startsWith(key + "=")) {
+                return line.substring(key.length() + 1);
             }
-            return sb.toString();
-        } catch (Exception e) {
-            throw new RuntimeException("SHA-256 unavailable", e);
         }
+        throw new EvidenceValidationException("EVIDENCE_SUMMARY_FIELDS", key);
     }
 }
