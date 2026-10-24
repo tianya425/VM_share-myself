@@ -2,7 +2,7 @@
 
 | 文档属性 | 内容 |
 |---|---|
-| 版本 | V0.4 |
+| 版本 | V0.5 |
 | 日期 | 2026-10-24 |
 | 状态 | FROZEN |
 | 证据等级 | LOCAL_SIMULATION |
@@ -52,7 +52,7 @@
 - 使用网络请求替代本地 Fake
 - 使用真实 `Thread.sleep` 等待逻辑时间到达
 - 使用系统当前时间作为场景业务结论的一部分
-- 在 PR5/PR6 完成前，声称资源运行时 / 资源场景已可用（`RESOURCE_ACTION_NOT_AVAILABLE`、`RESOURCE_ORACLE_NOT_AVAILABLE` 为未接线的 fail-closed 标记）
+- 将本地资源仿真（单容量、固定队列、虚拟时钟、`ScriptedFakeRcsAdapter`）声明为真实 AGV / PLC / MES 调度结论
 
 ## M4 不适用
 
@@ -72,6 +72,14 @@
 - PRODUCTION_READY
 - CAPACITY_PASS
 
+## 资源仿真的边界
+
+- 资源容量固定为 1；同一资源同一时刻最多一个 HELD
+- 队列稳定键为 `offsetMillis → logicalSequence → applicationId`；晋升只取队首
+- 终态 `RELEASED` / `CANCELLED` 不可重开
+- `WORLD_RESTART` 保留同一 Storage / Clock / Fake，丢弃并重建 Registry 与 Target，不触发外部调用
+- 资源动作只作用于 `lab.simulation.resource` 的虚拟世界，不代表真实 AGV / 线边仓 / PLC 的调度合同
+
 ## 未执行项
 
 - 未连接真实 M4
@@ -81,7 +89,7 @@
 - 未连接真实数据库
 - 未执行任何真实外部写
 - 未执行 Lab 综合验证、Shadow、Canary、Site Acceptance、容量测试
-- Part B 资源领域模型已接线（PR4）；资源运行时 / 资源场景未开始
+- 资源运行时 / 资源场景只在本地仿真验证；未接入真实调度系统
 
 ## 当前验证事实
 
@@ -91,4 +99,4 @@
 
 终点行（2026-10-24 实测，逐字）：
 
-    SIMULATION_R1_VERIFICATION_PASS originalCases=30 validScenarios=3 invalidScenarios=3 replay=1 evidenceBundles=5 realExternalWrites=0
+    SIMULATION_RESOURCE_VERIFICATION_PASS originalCases=30 baseValidScenarios=3 baseInvalidScenarios=3 resourceValidScenarios=6 resourceInvalidScenarios=5 resourceReplay=6 realExternalWrites=0

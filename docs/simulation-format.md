@@ -2,12 +2,12 @@
 
 | 文档属性 | 内容 |
 |---|---|
-| 版本 | V0.2 |
+| 版本 | V0.3 |
 | 日期 | 2026-10-24 |
 | 类型 | 场景文件与 Evidence 格式说明 |
 | 对应正式文档 | IDS 仿真、回放与验证架构说明书 |
-| 状态 | FROZEN（随 PR3 交付冻结） |
-| 绑定代码 | `lab.simulation.ScenarioParser` / `EvidenceBundleValidator` / `EvidenceBundleWriter` / `ReplayComparator` |
+| 状态 | FROZEN（PR5/PR6 资源运行时增补冻结） |
+| 绑定代码 | `lab.simulation.ScenarioParser` / `EvidenceBundleValidator` / `EvidenceBundleWriter` / `ReplayComparator` / `ResourceInvariantOracle` |
 
 ## 文档说明
 
@@ -105,7 +105,8 @@ ACCEPTED 和 TIMEOUT_BUT_CREATED 必须提供 externalOrderId；其余使用 `-`
 | RESERVATION_CANCEL | 1 | applicationId |
 | WORLD_RESTART | 0 | — |
 
-> Part B 的 8 个 action 在 PR4 完成 parse 期校验；运行时分发由 PR5/PR6 接线（未接线前运行会以 `RESOURCE_ACTION_NOT_AVAILABLE` 失败，不会静默跳过）。
+> Part B 的 8 个 action 由运行时按事件分发。`WORLD_RESTART` 保留同一 Storage / Clock / Fake，
+> 丢弃 Registry 与 Target 后用 `loadState()` 重建，并记录重载前后的规范快照摘要；不触发外部调用。
 
 ## EXPECT 类型
 
@@ -126,7 +127,7 @@ ACCEPTED 和 TIMEOUT_BUT_CREATED 必须提供 externalOrderId；其余使用 `-`
 | WORLD_RESTART_CONSISTENT | 0 | — |
 | SINGLE_CAPACITY | 1 | resourceId |
 
-> 资源 EXPECT 的运行时检查器由 PR5/PR6 接线；接线前 fail-closed 为 `RESOURCE_ORACLE_NOT_AVAILABLE`。
+> 资源 EXPECT 的检查器在运行时始终启用：`RESERVATION_STATE` / `HELD_COUNT` / `WAITING_COUNT` / `RESOURCE_AVAILABILITY` / `QUEUE_ORDER` / `QUEUE_EMPTY` / `WORLD_RESTART_CONSISTENT` / `SINGLE_CAPACITY`。0 条或重复条目一律 FAIL（`MISSING` / `DUPLICATE_*`），不得静默 PASS。
 
 ## Parser 稳定错误码
 
@@ -221,7 +222,22 @@ ACCEPTED 和 TIMEOUT_BUT_CREATED 必须提供 externalOrderId；其余使用 `-`
 
     oracleId	ruleType	status	expected	actual	detail
 
-六条系统不变量固定存在：`ORC-SYS-001` 外部调用全部有脚本、`ORC-SYS-002` 同一申请最多一个有效外单、`ORC-SYS-003` Unknown 先对账、`ORC-SYS-004` 终态不倒退、`ORC-SYS-005` Evidence 不越级、`ORC-SYS-006` 零真实外部写；场景 `EXPECT` 追加在系统不变量之后。
+六条系统不变量固定存在：`ORC-SYS-001` 外部调用全部有脚本、`ORC-SYS-002` 同一申请最多一个有效外单、`ORC-SYS-003` Unknown 先对账、`ORC-SYS-004` 终态不倒退、`ORC-SYS-005` Evidence 不越级、`ORC-SYS-006` 零真实外部写。
+
+六条资源不变量也固定存在（始终启用、真算，不可由场景关闭）：
+
+| oracleId | ruleType | 真实计算口径 |
+|---|---|---|
+| ORC-RES-SYS-001 | SINGLE_CAPACITY | 任一观察点上同一资源最多一个 HELD |
+| ORC-RES-SYS-002 | QUEUE_ORDER | WAITING 按 `offset → logicalSequence → applicationId` 升序；晋升只能取队首 |
+| ORC-RES-SYS-003 | TERMINAL_MONOTONIC | RELEASED / CANCELLED 之后不得再变回非终态 |
+| ORC-RES-SYS-004 | IDEMPOTENT_STABLE | IDEMPOTENT 请求前后，预约编号、状态与排序键逐字段不变 |
+| ORC-RES-SYS-005 | DISABLE_KEEPS_HOLDER | `RESOURCE_SET ... DISABLED` 前后该资源的 HELD 持有者集合不变 |
+| ORC-RES-SYS-006 | RESTART_REPLAY | 逐对比较 `WORLD_RESTART` 前后规范快照的 SHA-256 |
+
+`ORC-RES-SYS-006` 的 `actual` 必须是 `restartPairs=<n>,mismatches=<m>`（例如 `restartPairs=2,mismatches=0`），`expected` 为 `restartPairs=<n>,mismatches=0`；禁止只写 `true` 或硬编码 PASS。
+
+场景 `EXPECT` 追加在十二条固定不变量之后；结果按 `oracleId` 升序排列。
 
 ### manifest.sha256
 

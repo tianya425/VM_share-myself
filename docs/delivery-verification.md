@@ -903,3 +903,103 @@ CASES_TOTAL=30 CASES_PASSED=28 CASES_FAILED=2
 ### 9.7 未做（留给 PR5/PR6）
 
 资源 Action 分发表、`ReservationDecision` 按 eventId 观察、`WORLD_RESTART` 运行时重建、8 个资源 EXPECT 检查器、`ORC-RES-SYS-001..006`、6 个资源场景与 6 项资源变异（`RESOURCE_SCENARIO_CASES_PASSED=10` 终端线）。
+
+## 十、PR5/PR6 资源运行时记录（Part B / S6，2026-10-24）
+
+### 10.1 基线与范围
+
+| 项 | 值 |
+|---|---|
+| 仓库 | `VM_share-myself`（私有） |
+| 基线 main | `13d4e58`（PR4 合并提交；双亲 `439209e` + `f3d1fcb`，树 `f3d1fcb`） |
+| 分支 | `sim-02-resource-runtime`，起点 `13d4e58` |
+| 环境 | Ubuntu 24.04 / OpenJDK 21.0.12.1 / `--release 21 -encoding UTF-8` / class `major version 65` |
+
+范围：只做 PR5/PR6（T1—T5 与 RES-MUT-01..06）。Part A 的 30 个 golden 零改动；Part A 交付 ZIP 继续冻结，未重打。
+
+### 10.2 实现清单
+
+- **运行时（T1）**：8 个资源 Action 全部分派；每次 `RESERVATION_REQUEST` 的 `ReservationDecision` 按 eventId 存入 `RunFactLog`；`WORLD_RESTART` 保留同一 Storage / Clock / Fake，丢弃 Registry 与 Target，用 `loadState()` 重建派生结构，记录 `beforeDigest/afterDigest`，不触发外部调用。
+- **资源 Oracle（T2）**：`ResourceInvariantOracle` 真算 `ORC-RES-SYS-001..006`（单容量、队列顺序、终态单调、幂等稳定、禁用不驱逐、重启一致）；`-006` 的 actual 固定为 `restartPairs=<n>,mismatches=<m>`；8 个资源 EXPECT 检查器不使用 `findFirst()`，0 条 / 重复条目一律 FAIL。
+- **场景（T3）**：`scenarios/resource/` 6 个合法场景 `SIM-101..106`；`scenarios/resource/invalid/` 5 个非法场景 `SIM-INVALID-101..105`；6 个合法场景各跑两次，证据逐字节一致。
+- **检查（T4）**：`ResourceScenarioChecks` 的 `rsc01()..rsc10()`，输出 `RESOURCE_SCENARIO_CASES_PASSED=10`。
+- **全量脚本（T5）**：`scripts/verify-simulation.sh` 扩展到 35 步；唯一终点改为资源版；新增 6 场景双跑 compare 与 5 个非法场景的首错停止检查；22 个证据包统一校验。
+- **既有断言维护**：`SimulationRuntimeChecks.run01` 的 `oraclePassCount` 期望 11 → 17（证据固定新增 6 条资源不变量行）；RUN-01..18 的 case 数与其余断言不变。
+
+### 10.3 先红证据（RED-01）
+
+在临时副本中只回退运行时分发（保留新 Oracle / 新检查）：
+
+```
+PATCH_OK RED-01
+actualExitCode=1
+RSC-01 FAIL: scenarios/resource/sim-101-single-hold-release.scenario runStatus=FAILED firstFailure=RESOURCE_ACTION_NOT_AVAILABLE
+rscPassed=7
+rscFailed=3
+RESOURCE_SCENARIO_CASES_PASSED=7
+RSC-09 PASS
+temporaryCopyRemoved=true
+```
+
+RSC-01 / RSC-06 / RSC-07 变红，证明场景级检查不是靠“接线了就绿”的装饰；RSC-09 走合成反例，仍能独立验证六条 Oracle 的 FAIL 能力。
+
+### 10.4 全量实测（退出码 0，`bash scripts/verify-simulation.sh`）
+
+```
+CHECKS_PASSED=279
+CONCURRENCY_CHECKS_PASSED=8
+RELIABILITY_R1_CASES_PASSED=14
+ORIGINAL_CASES_OK total=30 passed=30
+SCENARIO_PARSER_CASES_PASSED=16
+SIMULATION_RUNTIME_CASES_PASSED=18
+RESOURCE_WORLD_CASES_PASSED=24
+RESOURCE_STORAGE_CASES_PASSED=6
+RESOURCE_PARSER_CASES_PASSED=7
+RESOURCE_SCENARIO_CASES_PASSED=10
+REPLAY_EVIDENCE_R1_CASES_PASSED=12
+RESOURCE_VALID_SCENARIOS=6
+REPLAY_MATCH SIM-101 version=1
+REPLAY_MATCH SIM-102 version=1
+REPLAY_MATCH SIM-103 version=1
+REPLAY_MATCH SIM-104 version=1
+REPLAY_MATCH SIM-105 version=1
+REPLAY_MATCH SIM-106 version=1
+RESOURCE_REPLAY=6
+RUN_FAILED SIM-INVALID-101 RESOURCE_TARGET_MISMATCH
+RUN_FAILED SIM-INVALID-102 UNKNOWN_POINT
+RUN_FAILED SIM-INVALID-103 RESERVATION_CONFLICT
+RUN_FAILED SIM-INVALID-104 RESERVATION_TERMINAL
+RUN_FAILED SIM-INVALID-105 RESOURCE_TARGET_MISMATCH
+RESOURCE_INVALID_SCENARIOS=5
+BASE_EVIDENCE_BUNDLES=5 RESOURCE_EVIDENCE_BUNDLES=17 EVIDENCE_BUNDLES=22
+EVIDENCE_SHAPE_OK dirs=22
+SUMMARY_FIELDS_OK count=21
+EVIDENCE_SCAN_OK
+DOCS_SCAN_OK
+WORKSPACE_OK DETERMINISM_OK
+SIMULATION_RESOURCE_VERIFICATION_PASS originalCases=30 baseValidScenarios=3 baseInvalidScenarios=3 resourceValidScenarios=6 resourceInvalidScenarios=5 resourceReplay=6 realExternalWrites=0
+```
+
+### 10.5 资源 Oracle 证据片段（SIM-106）
+
+```
+ORC-151	WORLD_RESTART_CONSISTENT	PASS	restartPairs>0,mismatches=0	restartPairs=2,mismatches=0
+ORC-RES-SYS-001	SINGLE_CAPACITY	PASS	maxHeldPerResource<=1	maxHeldPerResource=1
+ORC-RES-SYS-002	QUEUE_ORDER	PASS	queueKeyAscending,promoteHeadOnly	waitingPairs=0,inversions=0,promotions=2,skippedHead=0
+ORC-RES-SYS-003	TERMINAL_MONOTONIC	PASS	terminalNeverReopens	reservationObservations=11,terminalReopens=0
+ORC-RES-SYS-004	IDEMPOTENT_STABLE	PASS	idempotentUnchanged	idempotentRequests=0,mismatches=0
+ORC-RES-SYS-005	DISABLE_KEEPS_HOLDER	PASS	holdersUnchangedOnDisable	disableEvents=0,holderEvictions=0
+ORC-RES-SYS-006	RESTART_REPLAY	PASS	restartPairs=2,mismatches=0	restartPairs=2,mismatches=0
+```
+
+### 10.6 变异测试（RES-MUT-01..06）
+
+六项全部在临时副本中完成，每项都让目标检查以非零退出失败，并留下真实 Oracle FAIL 行。完整记录见 `docs/resource-mutation-results.md`。
+
+### 10.7 边界与外部副作用
+
+- 真实外部写：`realExternalWrites=0`；22 个证据包的 `realExternalWriteCount` 全部为 0。
+- 未连接真实 M4 / AGV / PLC / MES / 数据库；未访问现场网络。
+- `cases/*.expected.txt` 零改动（30 个旧 case 逐字节 diff 全过）。
+- Part A 交付 ZIP（`d05e1646…`）未重打、未改动。
+- `WORLD_RESTART` 只重建本地 Registry / Target；`ScriptedFakeRcsAdapter` 未收到额外调用（RSC-06 断言 `externalCallAttempts` 与 `interactions` 均为空）。

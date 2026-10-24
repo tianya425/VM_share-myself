@@ -1,5 +1,7 @@
 package lab.simulation.resource;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -62,6 +64,25 @@ public record ResourceWorldSnapshot(
                     .append(reservation.logicalSequence()).append('\n');
         }
         return builder.toString();
+    }
+
+    /**
+     * 规范快照的 SHA-256（小写 hex，基于 UTF-8 的 {@link #canonicalText()}）。
+     *
+     * <p>WORLD_RESTART 用它记录重载前后的摘要，逐字比较即可判断重载是否一致。
+     */
+    public String canonicalDigest() {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] bytes = digest.digest(canonicalText().getBytes(StandardCharsets.UTF_8));
+            StringBuilder builder = new StringBuilder(bytes.length * 2);
+            for (byte b : bytes) {
+                builder.append(String.format("%02x", b));
+            }
+            return builder.toString();
+        } catch (Exception e) {
+            throw new IllegalStateException("SHA-256 unavailable", e);
+        }
     }
 
     private static List<Destination> sortedDestinations(List<Destination> values) {

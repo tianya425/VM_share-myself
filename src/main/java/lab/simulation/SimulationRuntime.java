@@ -7,6 +7,9 @@ import lab.OutboxStatus;
 import lab.Registry;
 import lab.RegistryException;
 import lab.TransferApplication;
+import lab.simulation.resource.Reservation;
+import lab.simulation.resource.ReservationDecision;
+import lab.simulation.resource.ResourceWorldSnapshot;
 
 import java.time.Instant;
 import java.util.ArrayList;
@@ -100,8 +103,21 @@ public class SimulationRuntime {
             }
 
             ctx.clock().advanceTo(event.offsetMillis());
+            ResourceWorldSnapshot before = isResourceAction(event.action())
+                    ? ctx.target().resourceWorldSnapshot()
+                    : null;
             try {
-                dispatch(ctx.target(), event);
+                dispatch(ctx, event);
+                if (before != null) {
+                    facts.recordResourceStep(new ResourceStep(
+                            event.eventId(),
+                            event.action(),
+                            resourceIdOf(event),
+                            valueOf(event),
+                            before,
+                            ctx.target().resourceWorldSnapshot(),
+                            facts.reservationDecisions().get(event.eventId())));
+                }
                 timeline.add(new EventRecord(event, "EVENT_PASS", "", ctx.clock().now()));
                 eventPass++;
             } catch (RegistryException | ScenarioValidationException e) {
@@ -115,7 +131,8 @@ public class SimulationRuntime {
         return new Execution(eventPass, eventFail, eventSkipped, firstFailure);
     }
 
-    private void dispatch(SimulationTarget target, ScenarioEvent event) {
+    private void dispatch(RuntimeContext ctx, ScenarioEvent event) {
+        SimulationTarget target = ctx.target();
         List<String> args = event.arguments();
         switch (event.action()) {
             case POINT_ADD -> target.pointAdd(args.get(0), args.get(1));
@@ -126,10 +143,58 @@ public class SimulationRuntime {
             case OUTBOX_PROCESS -> target.outboxProcess();
             case WORKFLOW_START -> target.workflowStart(args.get(0));
             case WORKFLOW_ADVANCE -> target.workflowAdvance(args.get(0));
-            case DESTINATION_ADD, SERVICE_POINT_ADD, VIRTUAL_RESOURCE_ADD, RESOURCE_SET,
-                 RESERVATION_REQUEST, RESERVATION_RELEASE, RESERVATION_CANCEL, WORLD_RESTART ->
-                    throw new RegistryException("RESOURCE_ACTION_NOT_AVAILABLE", event.eventId());
+            case DESTINATION_ADD -> target.destinationAdd(args.get(0), args.get(1));
+            case SERVICE_POINT_ADD -> target.servicePointAdd(
+                    args.get(0), args.get(1), args.get(2), args.get(3));
+            case VIRTUAL_RESOURCE_ADD -> target.virtualResourceAdd(args.get(0), args.get(1));
+            case RESOURCE_SET -> target.resourceSetAvailability(args.get(0), args.get(1));
+            case RESERVATION_REQUEST -> {
+                ReservationDecision decision = target.reservationRequest(
+                        args.get(0), args.get(1), args.get(2), args.get(3),
+                        event.offsetMillis(), event.logicalSequence());
+                if (decision == null) {
+                    throw new RegistryException("RESERVATION_DECISION_MISSING", event.eventId());
+                }
+                facts.recordReservationDecision(event.eventId(), decision);
+            }
+            case RESERVATION_RELEASE -> target.reservationRelease(args.get(0));
+            case RESERVATION_CANCEL -> target.reservationCancel(args.get(0));
+            case WORLD_RESTART -> restart(ctx, event);
         }
+    }
+
+    /**
+     * 保留同一 Storage / Clock / Fake，丢弃 Registry 与 Target，
+     * 用 {@code loadState()} 重建并重派生结构；不触发任何外部调用。
+     */
+    private void restart(RuntimeContext ctx, ScenarioEvent event) {
+        String beforeDigest = ctx.target().resourceWorldSnapshot().canonicalDigest();
+        Registry reloaded = new Registry(ctx.storage(), ctx.fake(), false);
+        ctx.replaceTarget(reloaded);
+        String afterDigest = ctx.target().resourceWorldSnapshot().canonicalDigest();
+        facts.recordRestartPair(new RestartPair(event.eventId(), beforeDigest, afterDigest));
+    }
+
+    private static boolean isResourceAction(ScenarioEvent.Action action) {
+        return switch (action) {
+            case DESTINATION_ADD, SERVICE_POINT_ADD, VIRTUAL_RESOURCE_ADD, RESOURCE_SET,
+                 RESERVATION_REQUEST, RESERVATION_RELEASE, RESERVATION_CANCEL, WORLD_RESTART -> true;
+            default -> false;
+        };
+    }
+
+    private static String resourceIdOf(ScenarioEvent event) {
+        return switch (event.action()) {
+            case VIRTUAL_RESOURCE_ADD, RESOURCE_SET -> event.arguments().get(0);
+            case RESERVATION_REQUEST -> event.arguments().get(3);
+            default -> "";
+        };
+    }
+
+    private static String valueOf(ScenarioEvent event) {
+        return event.action() == ScenarioEvent.Action.RESOURCE_SET
+                ? event.arguments().get(1)
+                : "";
     }
 
     /**
@@ -191,7 +256,10 @@ public class SimulationRuntime {
                 skipped,
                 SimulationRunResult.EVIDENCE_LEVEL,
                 ctx.fake().getClass().getSimpleName(),
-                0);
+                0,
+                ctx.target().resourceWorldSnapshot(),
+                facts.resourceSteps(),
+                facts.restartPairs());
         return new InvariantOracle(scenario).check(oracleCtx);
     }
 
@@ -311,6 +379,34 @@ public class SimulationRuntime {
     }
 
     /**
+     * 每次 {@code RESERVATION_REQUEST} 的决策，按 eventId 存档。
+     */
+    public Map<String, ReservationDecision> reservationDecisions() {
+        return facts.reservationDecisions();
+    }
+
+    /**
+     * 资源 Action 的执行观察（按执行顺序）。
+     */
+    public List<ResourceStep> resourceSteps() {
+        return facts.resourceSteps();
+    }
+
+    /**
+     * 每次 {@code WORLD_RESTART} 的前后摘要对（按执行顺序）。
+     */
+    public List<RestartPair> restartPairs() {
+        return facts.restartPairs();
+    }
+
+    /**
+     * 运行结束时的资源世界规范快照；未运行时为空快照。
+     */
+    public ResourceWorldSnapshot resourceWorldSnapshot() {
+        return ctx == null ? ResourceWorldSnapshot.empty() : ctx.target().resourceWorldSnapshot();
+    }
+
+    /**
      * 计划事件数。
      */
     public int plannedCount() {
@@ -370,12 +466,54 @@ public class SimulationRuntime {
 
     // ---------- 辅助类型 ----------
 
-    private record RuntimeContext(
-            VirtualClock clock,
-            MemoryStorage storage,
-            Registry registry,
-            ScriptedFakeRcsAdapter fake,
-            RegistrySimulationTarget target) {
+    /**
+     * 运行时上下文：Storage / Clock / Fake 在一次运行内固定；
+     * Registry 与 Target 可被 {@code WORLD_RESTART} 整体替换。
+     */
+    private static final class RuntimeContext {
+
+        private final VirtualClock clock;
+        private final MemoryStorage storage;
+        private final ScriptedFakeRcsAdapter fake;
+        private Registry registry;
+        private RegistrySimulationTarget target;
+
+        private RuntimeContext(VirtualClock clock,
+                               MemoryStorage storage,
+                               Registry registry,
+                               ScriptedFakeRcsAdapter fake,
+                               RegistrySimulationTarget target) {
+            this.clock = clock;
+            this.storage = storage;
+            this.registry = registry;
+            this.fake = fake;
+            this.target = target;
+        }
+
+        VirtualClock clock() {
+            return clock;
+        }
+
+        MemoryStorage storage() {
+            return storage;
+        }
+
+        ScriptedFakeRcsAdapter fake() {
+            return fake;
+        }
+
+        Registry registry() {
+            return registry;
+        }
+
+        RegistrySimulationTarget target() {
+            return target;
+        }
+
+        void replaceTarget(Registry reloaded) {
+            this.registry = reloaded;
+            this.target = new RegistrySimulationTarget(reloaded);
+        }
     }
 
     private record Execution(int pass, int fail, int skipped, RunFailure firstFailure) {

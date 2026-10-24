@@ -135,7 +135,23 @@ SIMULATION_R1_VERIFICATION_PASS originalCases=30 validScenarios=3 invalidScenari
 - 证据格式升级到 `schemaVersion=2` 后，旧证据包不再通过新校验器；仓库内不跟踪旧证据包
 - 未连接真实 M4、AGV、PLC、MES
 - 不代表真实 Lab、容量或生产资格
-- Part B 资源领域模型已接线（PR4：`lab.simulation.resource` 领域层 + 三类存储 + Parser 8 Action / 8 EXPECT）；资源运行时与资源场景未开始（PR5/PR6），未接线动作与资源 EXPECT 一律 fail-closed
+- Part B 资源运行时与资源场景已接线（PR5/PR6）：8 个资源 Action 分派、6 条资源不变量、10 项 RSC 检查、6 个资源合法场景 + 5 个非法场景；只做本地仿真，不接真实调度系统
+
+## Part B / PR5—PR6 增量（2026-10-24）
+
+绑定：分支 `sim-02-resource-runtime`，基线 `13d4e58`（PR4 合并后的 main）。
+
+- 运行时：8 个资源 Action 分派；每次 `RESERVATION_REQUEST` 的 `ReservationDecision` 按 eventId 存入运行观察；`WORLD_RESTART` 保留同一 Storage / Clock / Fake，丢弃并重建 Registry 与 Target，记录重载前后规范摘要，不触发外部调用。
+- 资源 Oracle：`ORC-RES-SYS-001..006` 始终启用、真算；`ORC-RES-SYS-006` 输出 `restartPairs=<n>,mismatches=<m>`；8 个资源 EXPECT 检查器对 0 条 / 重复条目一律 FAIL。
+- 场景：`scenarios/resource/` 6 个合法场景（`SIM-101..106`）+ `scenarios/resource/invalid/` 5 个非法场景（`SIM-INVALID-101..105`）；6 个合法场景各跑两次，证据逐字节一致。
+- 检查：`RESOURCE_WORLD_CASES_PASSED=24`、`RESOURCE_STORAGE_CASES_PASSED=6`、`RESOURCE_PARSER_CASES_PASSED=7`、`RESOURCE_SCENARIO_CASES_PASSED=10`。
+- 全量脚本：35 步，唯一终点
+
+```
+SIMULATION_RESOURCE_VERIFICATION_PASS originalCases=30 baseValidScenarios=3 baseInvalidScenarios=3 resourceValidScenarios=6 resourceInvalidScenarios=5 resourceReplay=6 realExternalWrites=0
+```
+
+- 变异：`RES-MUT-01..06` 六项都在临时副本中完成，每项都让目标检查非零退出失败，记录见 `docs/resource-mutation-results.md`。
 
 ## 声明
 
