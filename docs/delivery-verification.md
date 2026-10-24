@@ -788,6 +788,7 @@ SIMULATION_R1_VERIFICATION_PASS originalCases=30 validScenarios=3 invalidScenari
 - **boundary**：`LOCAL_SIMULATION`、`realExternalWrites=0`、M4 不适用（`N/A`）、绑定 `88bf021`。
 - **handoff**：状态 `FINAL_CANDIDATE`、绑定 commit 与交付 ZIP 名、`FORMAL_REPOSITORY_CHANGE=NONE` / `REAL_M4_ACCESS=NONE` / `REAL_EXTERNAL_WRITE_COUNT=0`。
 - **traceability / open-items / evidence-template**：按已实现项与真实未决更新，无占位符。
+- **安全扫描口径**：Evidence 与 README/docs 不得出现绝对路径、仓库账号名、真实内网 IP、凭据值（以 token、password、secret 为键并紧跟取值，或 Bearer 后跟凭据）；越级声明词只允许出现在禁止清单或否定语境。`docs/security-baseline.md` 等安全文档里作为概念名出现的 Token / Secret 字样不视为凭据，扫描只拦凭据值。
 
 ### 8.7 交付包
 
