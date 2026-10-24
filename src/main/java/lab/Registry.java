@@ -61,16 +61,12 @@ public class Registry {
             throw new RegistryException("POINT_EXISTS", pointId);
         }
 
-        Point p = new Point(pointId, name);
-
-        // 先构造候选视图，保存成功后再发布到内存。
-        // 这样保存失败时内存不会保留幽灵状态。
-        Map<String, Point> candidate = new HashMap<>(points);
-        candidate.put(pointId, p);
-        storage.commitState(snapshotWithPoints(candidate));
-
-        points.put(pointId, p);
-        return p;
+        Point point = new Point(pointId, name);
+        CandidateState candidate = candidate();
+        candidate.points.add(point);
+        storage.commitState(candidate.toState());
+        publish(candidate);
+        return point;
     }
 
     public Optional<Point> findPoint(String pointId) {
@@ -112,16 +108,12 @@ public class Registry {
         if (fromPointId.equals(toPointId)) {
             throw new RegistryException("SAME_POINT", fromPointId);
         }
-    TransferApplication app = new TransferApplication(applicationId, fromPointId, toPointId);
-
-    // 先构造候选视图，保存成功后再发布到内存。
-    Map<String, TransferApplication> candidate = new HashMap<>(applications);
-    candidate.put(applicationId, app);
-    storage.commitState(snapshotWithApplications(candidate));
-
-    applications.put(applicationId, app);
-    return new RegistrationResult(app, false);
-
+        TransferApplication app = new TransferApplication(applicationId, fromPointId, toPointId);
+        CandidateState candidate = candidate();
+        candidate.applications.add(app);
+        storage.commitState(candidate.toState());
+        publish(candidate);
+        return new RegistrationResult(app, false);
     }
 
     public Optional<TransferApplication> findApplication(String applicationId) {
@@ -149,47 +141,25 @@ public class Registry {
             throw new RegistryException("INVALID_STATE_TRANSITION", applicationId);
         }
 
-        OutboxEntry entry = new OutboxEntry(
-                "OBX-" + applicationId,
-                applicationId,
-                existing.fromPointId(),
-                existing.toPointId(),
-                OutboxStatus.PENDING,
-                null,
-                0);
-        outbox.put(entry.entryId(), entry);
-        persistAll();
+        // ① 先提交 PENDING 意图：失败则不调用外部端口
+        OutboxEntry intent = pendingEntry(existing);
+        CandidateState intentState = candidate();
+        intentState.outbox.add(intent);
+        storage.commitState(intentState.toState());
+        publish(intentState);
 
-        ExternalOrderResult result = rcsPort.createOrder(
-                applicationId, existing.fromPointId(), existing.toPointId());
+        // ② 调外部端口，再按结果提交（失败则内存停在 ① 的已提交快照）
+        CandidateState resultState = candidate();
+        OutboxEntry committedIntent = lookupOutbox(resultState.outbox, intent.entryId());
+        ExternalOrderResult result = applyCreateResult(resultState, committedIntent);
+        storage.commitState(resultState.toState());
+        publish(resultState);
 
-        TransferApplication updated;
-        switch (result.outcome()) {
-            case ACCEPTED -> {
-                outbox.put(entry.entryId(), entry.withSent(result.externalOrderId()));
-                updated = existing.withState(ApplicationState.DISPATCHED)
-                        .withExternalOrderId(result.externalOrderId());
-            }
-            case TIMEOUT -> {
-                // 外部结果不确定：申请进入 UNKNOWN，
-                // Outbox 进入 UNCERTAIN，后续只允许 query。
-                outbox.put(entry.entryId(), entry.withUncertain());
-                updated = existing.withState(ApplicationState.UNKNOWN);
-            }
-            case REJECTED -> {
-                outbox.put(entry.entryId(), entry.withFailed());
-                persistAll();
-                throw new RegistryException("RCS_REJECTED", applicationId);
-            }
-            default -> {
-                persistAll();
-                throw new RegistryException("RCS_UNEXPECTED", applicationId);
-            }
-        }
-
-        applications.put(applicationId, updated);
-        persistAll();
-        return updated;
+        return switch (result.outcome()) {
+            case ACCEPTED, TIMEOUT -> applications.get(applicationId);
+            case REJECTED -> throw new RegistryException("RCS_REJECTED", applicationId);
+            default -> throw new RegistryException("RCS_UNEXPECTED", applicationId);
+        };
     }
 
     public synchronized TransferApplication queryApplication(String applicationId) {
@@ -205,19 +175,23 @@ public class Registry {
         }
 
         ExternalOrderResult result = rcsPort.queryOrder(applicationId);
-        TransferApplication updated;
-        switch (result.outcome()) {
-            case ACCEPTED -> {
-                updated = existing.withState(ApplicationState.DISPATCHED)
-                        .withExternalOrderId(result.externalOrderId());
-            }
+        TransferApplication updated = switch (result.outcome()) {
+            case ACCEPTED -> existing.withState(ApplicationState.DISPATCHED)
+                    .withExternalOrderId(result.externalOrderId());
             case NOT_FOUND -> throw new RegistryException("EXTERNAL_ORDER_NOT_FOUND", applicationId);
             default -> throw new RegistryException("RCS_UNEXPECTED", applicationId);
-        }
+        };
 
-        applications.put(applicationId, updated);
-        persistAll();
-        return updated;
+        // 申请与 Outbox 同一次提交
+        CandidateState candidate = candidate();
+        storeApplication(candidate.applications, updated);
+        OutboxEntry entry = lookupOutbox(candidate.outbox, "OBX-" + applicationId);
+        if (entry != null && entry.status() != OutboxStatus.SENT) {
+            storeOutbox(candidate.outbox, entry.withSent(result.externalOrderId()));
+        }
+        storage.commitState(candidate.toState());
+        publish(candidate);
+        return applications.get(applicationId);
     }
 
     public synchronized TransferApplication executeApplication(String applicationId) {
@@ -246,10 +220,11 @@ public class Registry {
             throw new RegistryException("INVALID_STATE_TRANSITION", applicationId);
         }
 
-        TransferApplication updated = existing.withState(target);
-        applications.put(applicationId, updated);
-        persistAll();
-        return updated;
+        CandidateState candidate = candidate();
+        storeApplication(candidate.applications, existing.withState(target));
+        storage.commitState(candidate.toState());
+        publish(candidate);
+        return applications.get(applicationId);
     }
 
     // ---------- outbox ----------
@@ -264,71 +239,43 @@ public class Registry {
         checkWritable();
         int processed = 0;
 
-        // 先收集需要处理的条目：
-        //   PENDING   → 调 create
-        //   UNCERTAIN → 只调 query
-        List<OutboxEntry> pending = new ArrayList<>();
-        List<OutboxEntry> uncertain = new ArrayList<>();
-        for (OutboxEntry e : outbox.values()) {
-            if (e.status() == OutboxStatus.PENDING) {
-                pending.add(e);
-            } else if (e.status() == OutboxStatus.UNCERTAIN) {
-                uncertain.add(e);
+        // PENDING 与 UNCERTAIN 都先 query：不允许直接 create（防止重复下单）
+        List<String> entryIds = new ArrayList<>();
+        for (OutboxEntry entry : outbox.values()) {
+            if (entry.status() == OutboxStatus.PENDING
+                    || entry.status() == OutboxStatus.UNCERTAIN) {
+                entryIds.add(entry.entryId());
             }
         }
-        pending.sort((a, b) -> a.entryId().compareTo(b.entryId()));
-        uncertain.sort((a, b) -> a.entryId().compareTo(b.entryId()));
+        entryIds.sort(String::compareTo);
 
-        // PENDING：允许 create
-        for (OutboxEntry entry : pending) {
-            ExternalOrderResult result = rcsPort.createOrder(
-                    entry.applicationId(), entry.fromPointId(), entry.toPointId());
-
-            switch (result.outcome()) {
-                case ACCEPTED -> {
-                    outbox.put(entry.entryId(), entry.withSent(result.externalOrderId()));
-                    TransferApplication app = applications.get(entry.applicationId());
-                    if (app != null && app.state() == ApplicationState.UNKNOWN) {
-                        applications.put(entry.applicationId(),
-                                app.withState(ApplicationState.DISPATCHED)
-                                        .withExternalOrderId(result.externalOrderId()));
-                    }
-                    processed++;
-                }
-                case REJECTED -> {
-                    outbox.put(entry.entryId(), entry.withFailed());
-                    processed++;
-                }
-                case TIMEOUT -> {
-                    outbox.put(entry.entryId(), entry.withOneMoreAttempt());
-                }
-                default -> { /* 忽略 */ }
+        for (String entryId : entryIds) {
+            OutboxEntry entry = outbox.get(entryId);
+            if (entry == null) {
+                continue;
             }
-        }
 
-        // UNCERTAIN：只 query，不 create
-        for (OutboxEntry entry : uncertain) {
             ExternalOrderResult result = rcsPort.queryOrder(entry.applicationId());
-
-            switch (result.outcome()) {
-                case ACCEPTED -> {
-                    outbox.put(entry.entryId(), entry.withSent(result.externalOrderId()));
-                    TransferApplication app = applications.get(entry.applicationId());
-                    if (app != null && app.state() == ApplicationState.UNKNOWN) {
-                        applications.put(entry.applicationId(),
-                                app.withState(ApplicationState.DISPATCHED)
-                                        .withExternalOrderId(result.externalOrderId()));
-                    }
-                    processed++;
-                }
-                case NOT_FOUND -> {
-                    // 保持 UNKNOWN / UNCERTAIN，不盲目重发
-                }
-                default -> { /* 忽略 */ }
+            if (result.outcome() != ExternalOrderResult.Outcome.ACCEPTED) {
+                // NOT_FOUND：保持 UNKNOWN/UNCERTAIN 与原状态，不盲目重发
+                continue;
             }
-        }
 
-        persistAll();
+            // 每条独立候选 + 独立提交；失败即停（异常向上抛）
+            CandidateState candidate = candidate();
+            storeOutbox(candidate.outbox,
+                    lookupOutbox(candidate.outbox, entryId).withSent(result.externalOrderId()));
+            TransferApplication app = lookupApplication(candidate.applications, entry.applicationId());
+            if (app != null && (app.state() == ApplicationState.UNKNOWN
+                    || app.state() == ApplicationState.CREATED)) {
+                storeApplication(candidate.applications,
+                        app.withState(ApplicationState.DISPATCHED)
+                                .withExternalOrderId(result.externalOrderId()));
+            }
+            storage.commitState(candidate.toState());
+            publish(candidate);
+            processed++;
+        }
         return processed;
     }
     // ---------- inbox ----------
@@ -344,33 +291,34 @@ public class Registry {
 
         InboxEntry existing = inbox.get(entryId);
         if (existing != null) {
+            // 去重：已处理过的回调直接返回，不再提交
             return existing;
         }
 
         TransferApplication app = applications.get(applicationId);
-        if (app == null) {
-            InboxEntry rejected = new InboxEntry(entryId, applicationId, eventType,
-                    InboxStatus.REJECTED, "UNKNOWN_APPLICATION");
-            inbox.put(entryId, rejected);
-            persistAll();
-            return rejected;
-        }
-
         ApplicationState target = targetState(eventType);
-        if (target == null || !app.state().canTransitionTo(target)) {
-            InboxEntry rejected = new InboxEntry(entryId, applicationId, eventType,
+        InboxEntry result;
+        if (app == null) {
+            result = new InboxEntry(entryId, applicationId, eventType,
+                    InboxStatus.REJECTED, "UNKNOWN_APPLICATION");
+        } else if (target == null || !app.state().canTransitionTo(target)) {
+            // 终态不得倒退：canTransitionTo 对 COMPLETED/CANCELLED 一律 false
+            result = new InboxEntry(entryId, applicationId, eventType,
                     InboxStatus.REJECTED, "INVALID_STATE_TRANSITION");
-            inbox.put(entryId, rejected);
-            persistAll();
-            return rejected;
+        } else {
+            result = new InboxEntry(entryId, applicationId, eventType,
+                    InboxStatus.PROCESSED, "");
         }
 
-        applications.put(applicationId, app.withState(target));
-        InboxEntry processed = new InboxEntry(entryId, applicationId, eventType,
-                InboxStatus.PROCESSED, "");
-        inbox.put(entryId, processed);
-        persistAll();
-        return processed;
+        // inbox 去重结果与申请状态流转同一次提交
+        CandidateState candidate = candidate();
+        candidate.inbox.add(result);
+        if (result.status() == InboxStatus.PROCESSED) {
+            storeApplication(candidate.applications, app.withState(target));
+        }
+        storage.commitState(candidate.toState());
+        publish(candidate);
+        return result;
     }
 
     public synchronized List<InboxEntry> listInbox() {
@@ -421,9 +369,11 @@ public class Registry {
                 0,
                 List.copyOf(steps));
 
-        workflows.put(applicationId, wf);
-        persistAll();
-        return wf;
+        CandidateState candidate = candidate();
+        candidate.workflows.add(wf);
+        storage.commitState(candidate.toState());
+        publish(candidate);
+        return workflows.get(applicationId);
     }
 
     public synchronized WorkflowInstance advanceWorkflow(String applicationId) {
@@ -445,48 +395,57 @@ public class Registry {
 
         String stepName = WORKFLOW_STEP_NAMES.get(index);
 
-        // 先执行对应业务动作。
-        //
-        // 如果申请状态已经到位（例如用户之前手动调用过
-        // application dispatch），就不重复推进，直接标记本步完成。
-        // 如果申请状态不符合（既不能推进也不能跳过），调用对应
-        // 业务方法让它按既有错误合同抛异常。
+        // 整步只提交一次：业务动作（含外部端口调用）与 Workflow 推进写在同一份候选快照上
+        CandidateState candidate = candidate();
+        TransferApplication app = lookupApplication(candidate.applications, applicationId);
+
+        // 如果申请状态已经到位（例如用户之前手动调用过 application dispatch），就不重复推进，
+        // 直接标记本步完成；状态不符合时保持不推进（与原行为一致）。
         switch (stepName) {
             case "DISPATCH" -> {
-                TransferApplication app = applications.get(applicationId);
                 if (app.state() == ApplicationState.CREATED) {
-                    dispatchApplication(applicationId);
+                    OutboxEntry intent = pendingEntry(app);
+                    candidate.outbox.add(intent);
+                    ExternalOrderResult result = applyCreateResult(candidate, intent);
+                    if (result.outcome() == ExternalOrderResult.Outcome.REJECTED) {
+                        // 只落失败意图，不推进步骤
+                        storage.commitState(candidate.toState());
+                        publish(candidate);
+                        throw new RegistryException("RCS_REJECTED", applicationId);
+                    }
+                    if (result.outcome() != ExternalOrderResult.Outcome.ACCEPTED
+                            && result.outcome() != ExternalOrderResult.Outcome.TIMEOUT) {
+                        throw new RegistryException("RCS_UNEXPECTED", applicationId);
+                    }
                 }
-                // 已经是 DISPATCHED / EXECUTING / COMPLETED，
-                // 说明用户手动推进过，跳过。
             }
             case "EXECUTE" -> {
-                TransferApplication app = applications.get(applicationId);
                 if (app.state() == ApplicationState.DISPATCHED) {
-                    executeApplication(applicationId);
+                    storeApplication(candidate.applications,
+                            app.withState(ApplicationState.EXECUTING));
                 }
             }
             case "COMPLETE" -> {
-                TransferApplication app = applications.get(applicationId);
                 if (app.state() == ApplicationState.EXECUTING) {
-                    completeApplication(applicationId);
+                    storeApplication(candidate.applications,
+                            app.withState(ApplicationState.COMPLETED));
                 }
             }
             default -> throw new RegistryException("WORKFLOW_UNKNOWN_STEP", stepName);
         }
 
-        // 业务动作成功后，才推进 Workflow。
-        WorkflowInstance updated = wf.withStep(index, WorkflowStepState.COMPLETED);
-        int nextIndex = index + 1;
-        updated = updated.withCurrentStepIndex(nextIndex);
-
-        if (nextIndex >= WORKFLOW_STEP_NAMES.size()) {
+        // T4 保持现状：业务动作未抛异常就推进步骤。
+        // 步骤完成条件绑定（超时/状态不符时保持 PENDING）属 T5，因此 R1-REL-09 仍为红。
+        WorkflowInstance updated = wf.withStep(index, WorkflowStepState.COMPLETED)
+                .withCurrentStepIndex(index + 1);
+        if (index + 1 >= WORKFLOW_STEP_NAMES.size()) {
             updated = updated.withState(WorkflowState.COMPLETED);
         }
 
-        workflows.put(applicationId, updated);
-        persistAll();
-        return updated;
+        storeWorkflow(candidate.workflows, updated);
+        storage.commitState(candidate.toState());
+        publish(candidate);
+        return workflows.get(applicationId);
     }
 
     public synchronized Optional<WorkflowInstance> findWorkflow(String applicationId) {
@@ -636,17 +595,33 @@ public class Registry {
                 overall);
     }
 
-    // ---------- persist ----------
+    // ---------- 提交合同（T4：候选快照 → 单次 commitState → 成功后发布内存） ----------
 
     /**
-     * T2 机械适配：Storage 只接受整状态提交。
+     * 候选状态：从已提交状态深拷贝出来的可改副本。
      *
-     * <p>原先按集合的 persist* 一律改为提交当前内存快照：内容相同，提交次数保持不变，
-     * 内存与已提交谁先谁后、失败后内存是否残留，全部沿用改造前的顺序。
-     * 统一成"候选快照 → 单次提交 → 成功后才发布内存"是 T4 的事。
+     * <p>写入口只改这个副本，改完 {@code storage.commitState(candidate.toState())} 一次性提交；
+     * 提交成功后才 {@link #publish} 到内存。提交失败时内存与已提交状态都保持原样。
      */
-    private void persistAll() {
-        storage.commitState(snapshot());
+    private static final class CandidateState {
+
+        private final List<Point> points;
+        private final List<TransferApplication> applications;
+        private final List<OutboxEntry> outbox;
+        private final List<InboxEntry> inbox;
+        private final List<WorkflowInstance> workflows;
+
+        CandidateState(RegistryState committed) {
+            this.points = new ArrayList<>(committed.points());
+            this.applications = new ArrayList<>(committed.applications());
+            this.outbox = new ArrayList<>(committed.outbox());
+            this.inbox = new ArrayList<>(committed.inbox());
+            this.workflows = new ArrayList<>(committed.workflows());
+        }
+
+        RegistryState toState() {
+            return new RegistryState(points, applications, outbox, inbox, workflows);
+        }
     }
 
     private RegistryState snapshot() {
@@ -657,20 +632,129 @@ public class Registry {
                 new ArrayList<>(workflows.values()));
     }
 
-    private RegistryState snapshotWithPoints(Map<String, Point> pointsView) {
-        return new RegistryState(new ArrayList<>(pointsView.values()),
-                new ArrayList<>(applications.values()),
-                new ArrayList<>(outbox.values()),
-                new ArrayList<>(inbox.values()),
-                new ArrayList<>(workflows.values()));
+    private CandidateState candidate() {
+        return new CandidateState(snapshot());
     }
 
-    private RegistryState snapshotWithApplications(Map<String, TransferApplication> applicationsView) {
-        return new RegistryState(new ArrayList<>(points.values()),
-                new ArrayList<>(applicationsView.values()),
-                new ArrayList<>(outbox.values()),
-                new ArrayList<>(inbox.values()),
-                new ArrayList<>(workflows.values()));
+    /**
+     * 提交成功之后，才把候选状态发布为内存状态。
+     */
+    private void publish(CandidateState candidate) {
+        points.clear();
+        for (Point point : candidate.points) {
+            points.put(point.pointId(), point);
+        }
+        applications.clear();
+        for (TransferApplication application : candidate.applications) {
+            applications.put(application.applicationId(), application);
+        }
+        outbox.clear();
+        for (OutboxEntry entry : candidate.outbox) {
+            outbox.put(entry.entryId(), entry);
+        }
+        inbox.clear();
+        for (InboxEntry entry : candidate.inbox) {
+            inbox.put(entry.entryId(), entry);
+        }
+        workflows.clear();
+        for (WorkflowInstance workflow : candidate.workflows) {
+            workflows.put(workflow.applicationId(), workflow);
+        }
+    }
+
+    // ---------- 候选态上的列表操作 ----------
+
+    private static TransferApplication lookupApplication(List<TransferApplication> list, String applicationId) {
+        for (TransferApplication application : list) {
+            if (application.applicationId().equals(applicationId)) {
+                return application;
+            }
+        }
+        return null;
+    }
+
+    private static void storeApplication(List<TransferApplication> list, TransferApplication updated) {
+        for (int i = 0; i < list.size(); i++) {
+            if (list.get(i).applicationId().equals(updated.applicationId())) {
+                list.set(i, updated);
+                return;
+            }
+        }
+        list.add(updated);
+    }
+
+    private static OutboxEntry lookupOutbox(List<OutboxEntry> list, String entryId) {
+        for (OutboxEntry entry : list) {
+            if (entry.entryId().equals(entryId)) {
+                return entry;
+            }
+        }
+        return null;
+    }
+
+    private static void storeOutbox(List<OutboxEntry> list, OutboxEntry updated) {
+        for (int i = 0; i < list.size(); i++) {
+            if (list.get(i).entryId().equals(updated.entryId())) {
+                list.set(i, updated);
+                return;
+            }
+        }
+        list.add(updated);
+    }
+
+    private static void storeWorkflow(List<WorkflowInstance> list, WorkflowInstance updated) {
+        for (int i = 0; i < list.size(); i++) {
+            if (list.get(i).applicationId().equals(updated.applicationId())) {
+                list.set(i, updated);
+                return;
+            }
+        }
+        list.add(updated);
+    }
+
+    private static OutboxEntry pendingEntry(TransferApplication application) {
+        return new OutboxEntry(
+                "OBX-" + application.applicationId(),
+                application.applicationId(),
+                application.fromPointId(),
+                application.toPointId(),
+                OutboxStatus.PENDING,
+                null,
+                0);
+    }
+
+    /**
+     * 调外部 create 端口，并把结果写进候选状态（不提交）。
+     *
+     * <p>REJECTED 只把 Outbox 标 FAILED、申请保持原状态；由调用方决定是否提交后抛错。
+     */
+    private ExternalOrderResult applyCreateResult(CandidateState candidate, OutboxEntry intent) {
+        TransferApplication app = lookupApplication(candidate.applications, intent.applicationId());
+        ExternalOrderResult result = rcsPort.createOrder(
+                intent.applicationId(), intent.fromPointId(), intent.toPointId());
+        switch (result.outcome()) {
+            case ACCEPTED -> {
+                storeOutbox(candidate.outbox, intent.withSent(result.externalOrderId()));
+                if (app != null) {
+                    storeApplication(candidate.applications,
+                            app.withState(ApplicationState.DISPATCHED)
+                                    .withExternalOrderId(result.externalOrderId()));
+                }
+            }
+            case TIMEOUT -> {
+                // 外部结果不确定：申请进入 UNKNOWN，Outbox 进入 UNCERTAIN，后续只允许 query
+                storeOutbox(candidate.outbox, intent.withUncertain());
+                if (app != null) {
+                    storeApplication(candidate.applications,
+                            app.withState(ApplicationState.UNKNOWN));
+                }
+            }
+            case REJECTED -> storeOutbox(candidate.outbox, intent.withFailed());
+            default -> {
+                // createOrder 不应返回 NOT_FOUND；不改候选状态
+            }
+        }
+        return result;
     }
 
     // ---------- shared validation ----------
