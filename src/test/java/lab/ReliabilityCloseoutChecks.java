@@ -510,6 +510,26 @@ public final class ReliabilityCloseoutChecks {
                         + " " + committedInstance.currentStepIndex() + "/" + committedInstance.steps().size()
                         + " step0=" + committedInstance.steps().get(0).state()
                         + " 期望=RUNNING 0/3 PENDING");
+
+        // 子断言 workflow_step_catches_up_when_ahead（不独立编号）：
+        // 申请已越过 DISPATCH 阶段（EXECUTING）时，advanceWorkflow 必须把 DISPATCH 步追平为完成，
+        // 否则旧 case sqlite-basic-2（期望 RUNNING 1/3）与任务书"达到或越过"解释就会脱钩。
+        MemoryStorage committed2 = new MemoryStorage();
+        CountingPort port2 = new CountingPort(FakeRcsAdapter.Mode.ACCEPT);
+        Registry registry2 = new Registry(committed2, port2);
+        registerBaseline(registry2);
+        registry2.dispatchApplication("APP-001");
+        registry2.receiveCallback("APP-001", "STARTED");
+        require(appState(registry2) == ApplicationState.EXECUTING,
+                "追平前置：申请状态=" + appState(registry2) + " 期望=EXECUTING");
+        registry2.startWorkflow("APP-001");
+        WorkflowInstance caughtUp = registry2.advanceWorkflow("APP-001");
+        require(caughtUp.steps().get(0).state() == WorkflowStepState.COMPLETED,
+                "追平：step0=" + caughtUp.steps().get(0).state() + " 期望=COMPLETED");
+        require(caughtUp.currentStepIndex() == 1,
+                "追平：stepIndex=" + caughtUp.currentStepIndex() + " 期望=1");
+        require(caughtUp.state() == WorkflowState.RUNNING,
+                "追平：workflow 状态=" + caughtUp.state() + " 期望=RUNNING");
     }
 
     // ================= R1-REL-10 =================

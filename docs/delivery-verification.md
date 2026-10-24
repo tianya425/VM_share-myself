@@ -347,6 +347,8 @@ PR2/PR3 的运行时与证据）之后**必须仍然为绿**。任一条变红�
 - 13：覆盖启动参数 fail closed；仍不覆盖 `sqlite readonly` 之外的启动路径（如 `file` 模式建目录失败）；
 - 14：不覆盖负向绑定（application 未到位却把步骤标 COMPLETED、手动跳步）——超时形态由 09 覆盖。
 
+> **T5b 补强（2026-10-24）**：R1-REL-09 追加具名子断言 `workflow_step_catches_up_when_ahead`（申请已越过目标阶段时必须追平），并用变异验证固定：把 `hasReached` 的 `>=` 改为 `==` 后，该子断言变红（`R1-REL-09 FAIL: 追平：step0=PENDING 期望=COMPLETED`，13 绿 1 红）。详见 §7.5.9。
+
 ### 7.4 T2 之后的锚点复核清单（必须逐项打勾）
 
 - [x] R1-REL-01：`RegistryState` 化后，UNCERTAIN 仍走 query；二次 `processOutbox` 仍不调外部端口（T2 实测：仍 PASS）；
@@ -596,6 +598,44 @@ CASES_TOTAL=30 CASES_PASSED=30 CASES_FAILED=0
 - 30 个旧 case 的 60 个产物 `diff -r` **无差异**（`CASE_RUNS_DIFF_EXIT=0`）；
 - REL 输出与 T5 最终态**逐字节一致**（`cmp` 退出 0）——T6 未改动任何红绿结论。
 
+#### 7.5.9 T5b 落地记录（"达到或越过"语义锚点 + 变异验证，2026-10-24 实测）
 
+**动机**：任务书 3.5 的严格等号（`application == DISPATCHED`）与旧 case `sqlite-basic-2` 的跳步语义
+（app 已 `EXECUTING` 时 advance 应追平为 `RUNNING 1/3`）冲突。T5 采用"达到或越过"（主线
+`CREATED < DISPATCHED < EXECUTING < COMPLETED`；`UNKNOWN/CANCELLED` 不在主线，不视为达成）。
+为防止该语义只靠旧 case 隐式保护，追加具名子断言。
 
+**改动**：`src/test/java/lab/ReliabilityCloseoutChecks.java` 的 `caseR1Rel09()` 追加
+`workflow_step_catches_up_when_ahead`：
+`dispatch(ACCEPT) → DISPATCHED` → `receiveCallback STARTED → EXECUTING` → `startWorkflow` → `advanceWorkflow`
+→ 断言 `step0=COMPLETED`、`currentStepIndex=1`、`workflow=RUNNING`。
 
+**验收（干净重编）**：
+
+```
+MAIN_JAVAC_EXIT=0
+TEST_JAVAC_EXIT=0
+  major version: 65
+RELIABILITY_R1_CASES_PASSED=14
+REL_EXIT=0
+CHECKS_PASSED=279
+CONCURRENCY_CHECKS_PASSED=8
+SCENARIO_PARSER_CHECKS_PASSED=15
+SIMULATION_RUNTIME_CHECKS_PASSED=14
+REPLAY_EVIDENCE_CHECKS_PASSED=9
+CASES_TOTAL=30 CASES_PASSED=30 CASES_FAILED=0
+```
+
+**变异验证（临时副本，不入库）**：
+
+- 变异点：`Registry.hasReached` 的 `lifecycleRank(current) >= targetRank` 改为 `==`
+- 实测输出：
+
+```
+R1-REL-09 FAIL: 追平：step0=PENDING 期望=COMPLETED
+R1-REL-09 INTENT: 超时（UNKNOWN/UNCERTAIN）后 workflow 必须保持 RUNNING 0/3、step0=PENDING
+RELIABILITY_R1_CASES_FAILED=1
+RELIABILITY_R1_CASES_PASSED=13
+```
+
+**结论**：该子断言确实钉住"追平"语义，不是恒真装饰；临时副本已删除，工作区未污染。
