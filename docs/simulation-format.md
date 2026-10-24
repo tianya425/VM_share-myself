@@ -96,6 +96,16 @@ ACCEPTED 和 TIMEOUT_BUT_CREATED 必须提供 externalOrderId；其余使用 `-`
 | OUTBOX_PROCESS | 0 | — |
 | WORKFLOW_START | 1 | applicationId |
 | WORKFLOW_ADVANCE | 1 | applicationId |
+| DESTINATION_ADD | 2 | destinationId, name |
+| SERVICE_POINT_ADD | 4 | servicePointId, destinationId, registryPointId, name |
+| VIRTUAL_RESOURCE_ADD | 2 | resourceId, servicePointId |
+| RESOURCE_SET | 2 | resourceId, ENABLED/DISABLED |
+| RESERVATION_REQUEST | 4 | applicationId, destinationId, servicePointId, resourceId |
+| RESERVATION_RELEASE | 1 | applicationId |
+| RESERVATION_CANCEL | 1 | applicationId |
+| WORLD_RESTART | 0 | — |
+
+> Part B 的 8 个 action 在 PR4 完成 parse 期校验；运行时分发由 PR5/PR6 接线（未接线前运行会以 `RESOURCE_ACTION_NOT_AVAILABLE` 失败，不会静默跳过）。
 
 ## EXPECT 类型
 
@@ -107,6 +117,16 @@ ACCEPTED 和 TIMEOUT_BUT_CREATED 必须提供 externalOrderId；其余使用 `-`
 | QUERY_CALLS | 2 | applicationId, count |
 | VALID_EXTERNAL_ORDERS | 2 | applicationId, count |
 | NO_DUPLICATE_EXTERNAL_ORDER | 1 | applicationId |
+| RESERVATION_STATE | 2 | applicationId, HELD/WAITING/RELEASED/CANCELLED |
+| HELD_COUNT | 2 | resourceId, count |
+| WAITING_COUNT | 2 | resourceId, count |
+| RESOURCE_AVAILABILITY | 2 | resourceId, ENABLED/DISABLED |
+| QUEUE_ORDER | ≥2 | resourceId, applicationId...（按队列顺序） |
+| QUEUE_EMPTY | 1 | resourceId |
+| WORLD_RESTART_CONSISTENT | 0 | — |
+| SINGLE_CAPACITY | 1 | resourceId |
+
+> 资源 EXPECT 的运行时检查器由 PR5/PR6 接线；接线前 fail-closed 为 `RESOURCE_ORACLE_NOT_AVAILABLE`。
 
 ## Parser 稳定错误码
 
@@ -126,6 +146,7 @@ ACCEPTED 和 TIMEOUT_BUT_CREATED 必须提供 externalOrderId；其余使用 `-`
 | SCENARIO_UNKNOWN_ACTION | action 或 outcome 不合法 |
 | SCENARIO_UNKNOWN_ORACLE | ruleType 不合法 |
 | SCENARIO_ARGUMENT_COUNT | 参数数量错误 |
+| SCENARIO_ARGUMENT_VALUE | 参数取值非法（枚举 / 计数） |
 | TIME_TRAVEL_BACKWARD | 运行时时钟倒退（运行期，退出码 1） |
 | UNSCRIPTED_EXTERNAL_CALL | 未脚本化的外部调用（运行期，退出码 1） |
 

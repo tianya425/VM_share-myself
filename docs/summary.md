@@ -179,7 +179,7 @@ SQLite 模式：`data/logistics.db`
 - 用最小实现验证概念
 - 不连接任何真实系统，`realExternalWrites=0`
 - 通过 GitHub PR 提交，合并后复验
-- 不进入正式工程；`GATE-A=PASS` 前不开始 Part B
+- 不进入正式工程；Part B 资源领域模型已在 PR4 接线，资源运行时与资源场景未完成（PR5/PR6）
 
 ## 变更记录
 

@@ -1,5 +1,13 @@
 package lab;
 
+import lab.simulation.resource.Destination;
+import lab.simulation.resource.Reservation;
+import lab.simulation.resource.ReservationState;
+import lab.simulation.resource.ResourceAvailability;
+import lab.simulation.resource.ResourceWorldSnapshot;
+import lab.simulation.resource.ServicePoint;
+import lab.simulation.resource.VirtualResource;
+
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
@@ -83,6 +91,41 @@ public class SqliteStorage implements Storage, AutoCloseable {
             )),
             new Migration(2, "add note column to applications", List.of(
                     "ALTER TABLE applications ADD COLUMN note TEXT"
+            )),
+            new Migration(3, "add resource tables", List.of(
+                    """
+                    CREATE TABLE IF NOT EXISTS destinations (
+                        destination_id TEXT PRIMARY KEY,
+                        name TEXT NOT NULL
+                    )
+                    """,
+                    """
+                    CREATE TABLE IF NOT EXISTS service_points (
+                        service_point_id TEXT PRIMARY KEY,
+                        destination_id TEXT NOT NULL,
+                        registry_point_id TEXT NOT NULL,
+                        name TEXT NOT NULL
+                    )
+                    """,
+                    """
+                    CREATE TABLE IF NOT EXISTS virtual_resources (
+                        resource_id TEXT PRIMARY KEY,
+                        service_point_id TEXT NOT NULL,
+                        availability TEXT NOT NULL
+                    )
+                    """,
+                    """
+                    CREATE TABLE IF NOT EXISTS reservations (
+                        reservation_id TEXT PRIMARY KEY,
+                        application_id TEXT NOT NULL,
+                        destination_id TEXT NOT NULL,
+                        service_point_id TEXT NOT NULL,
+                        resource_id TEXT NOT NULL,
+                        state TEXT NOT NULL,
+                        offset_millis INTEGER NOT NULL,
+                        logical_sequence INTEGER NOT NULL
+                    )
+                    """
             ))
     );
 
@@ -159,11 +202,12 @@ public class SqliteStorage implements Storage, AutoCloseable {
                 readApplications(),
                 readOutbox(),
                 readInbox(),
-                readWorkflows());
+                readWorkflows(),
+                readResourceWorld());
     }
 
     /**
-     * 单事务提交整份状态：五张表先全删再全插，一起 commit。
+     * 单事务提交整份状态：五张表 + 四张资源表先全删再全插，一起 commit。
      * 失败则 rollback，已提交状态不变。
      */
     @Override
@@ -177,12 +221,17 @@ public class SqliteStorage implements Storage, AutoCloseable {
                 statement.execute("DELETE FROM outbox");
                 statement.execute("DELETE FROM inbox");
                 statement.execute("DELETE FROM workflows");
+                statement.execute("DELETE FROM destinations");
+                statement.execute("DELETE FROM service_points");
+                statement.execute("DELETE FROM virtual_resources");
+                statement.execute("DELETE FROM reservations");
             }
             insertPoints(next.points());
             insertApplications(next.applications());
             insertOutbox(next.outbox());
             insertInbox(next.inbox());
             insertWorkflows(next.workflows());
+            insertResourceWorld(next.resourceWorld());
             conn.commit();
         } catch (SQLException e) {
             rollbackQuietly();
@@ -400,6 +449,84 @@ public class SqliteStorage implements Storage, AutoCloseable {
         return result;
     }
 
+    /**
+     * 读资源世界。表结构由 Migration 3 建立；行内容不合法时 fail-closed。
+     */
+    private ResourceWorldSnapshot readResourceWorld() {
+        List<Destination> destinations = new ArrayList<>();
+        List<ServicePoint> servicePoints = new ArrayList<>();
+        List<VirtualResource> resources = new ArrayList<>();
+        List<Reservation> reservations = new ArrayList<>();
+        try (Statement statement = conn.createStatement();
+             ResultSet rs = statement.executeQuery("SELECT destination_id, name FROM destinations")) {
+            while (rs.next()) {
+                destinations.add(new Destination(rs.getString("destination_id"), rs.getString("name")));
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("cannot load destinations", e);
+        }
+        try (Statement statement = conn.createStatement();
+             ResultSet rs = statement.executeQuery(
+                     "SELECT service_point_id, destination_id, registry_point_id, name FROM service_points")) {
+            while (rs.next()) {
+                servicePoints.add(new ServicePoint(
+                        rs.getString("service_point_id"),
+                        rs.getString("destination_id"),
+                        rs.getString("registry_point_id"),
+                        rs.getString("name")));
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("cannot load service_points", e);
+        }
+        try (Statement statement = conn.createStatement();
+             ResultSet rs = statement.executeQuery(
+                     "SELECT resource_id, service_point_id, availability FROM virtual_resources")) {
+            while (rs.next()) {
+                resources.add(new VirtualResource(
+                        rs.getString("resource_id"),
+                        rs.getString("service_point_id"),
+                        parseAvailability(rs.getString("availability"))));
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("cannot load virtual_resources", e);
+        }
+        try (Statement statement = conn.createStatement();
+             ResultSet rs = statement.executeQuery(
+                     "SELECT reservation_id, application_id, destination_id, service_point_id, "
+                             + "resource_id, state, offset_millis, logical_sequence FROM reservations")) {
+            while (rs.next()) {
+                reservations.add(new Reservation(
+                        rs.getString("reservation_id"),
+                        rs.getString("application_id"),
+                        rs.getString("destination_id"),
+                        rs.getString("service_point_id"),
+                        rs.getString("resource_id"),
+                        parseReservationState(rs.getString("state")),
+                        rs.getLong("offset_millis"),
+                        rs.getLong("logical_sequence")));
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("cannot load reservations", e);
+        }
+        return new ResourceWorldSnapshot(destinations, servicePoints, resources, reservations);
+    }
+
+    private static ResourceAvailability parseAvailability(String value) {
+        try {
+            return ResourceAvailability.valueOf(value);
+        } catch (IllegalArgumentException e) {
+            throw new RuntimeException("cannot load virtual_resources: availability=" + value, e);
+        }
+    }
+
+    private static ReservationState parseReservationState(String value) {
+        try {
+            return ReservationState.valueOf(value);
+        } catch (IllegalArgumentException e) {
+            throw new RuntimeException("cannot load reservations: state=" + value, e);
+        }
+    }
+
     // ---------- 写入（只在 commitState 的事务里调用） ----------
 
     private void insertPoints(List<Point> points) throws SQLException {
@@ -478,6 +605,54 @@ public class SqliteStorage implements Storage, AutoCloseable {
                 statement.setString(3, wf.state().name());
                 statement.setInt(4, wf.currentStepIndex());
                 statement.setString(5, steps.toString());
+                statement.addBatch();
+            }
+            statement.executeBatch();
+        }
+    }
+
+    private void insertResourceWorld(ResourceWorldSnapshot world) throws SQLException {
+        try (PreparedStatement statement = conn.prepareStatement(
+                "INSERT INTO destinations (destination_id, name) VALUES (?, ?)")) {
+            for (Destination destination : world.destinations()) {
+                statement.setString(1, destination.destinationId());
+                statement.setString(2, destination.name());
+                statement.addBatch();
+            }
+            statement.executeBatch();
+        }
+        try (PreparedStatement statement = conn.prepareStatement(
+                "INSERT INTO service_points (service_point_id, destination_id, registry_point_id, name) VALUES (?, ?, ?, ?)")) {
+            for (ServicePoint servicePoint : world.servicePoints()) {
+                statement.setString(1, servicePoint.servicePointId());
+                statement.setString(2, servicePoint.destinationId());
+                statement.setString(3, servicePoint.registryPointId());
+                statement.setString(4, servicePoint.name());
+                statement.addBatch();
+            }
+            statement.executeBatch();
+        }
+        try (PreparedStatement statement = conn.prepareStatement(
+                "INSERT INTO virtual_resources (resource_id, service_point_id, availability) VALUES (?, ?, ?)")) {
+            for (VirtualResource resource : world.resources()) {
+                statement.setString(1, resource.resourceId());
+                statement.setString(2, resource.servicePointId());
+                statement.setString(3, resource.availability().name());
+                statement.addBatch();
+            }
+            statement.executeBatch();
+        }
+        try (PreparedStatement statement = conn.prepareStatement(
+                "INSERT INTO reservations (reservation_id, application_id, destination_id, service_point_id, resource_id, state, offset_millis, logical_sequence) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")) {
+            for (Reservation reservation : world.reservations()) {
+                statement.setString(1, reservation.reservationId());
+                statement.setString(2, reservation.applicationId());
+                statement.setString(3, reservation.destinationId());
+                statement.setString(4, reservation.servicePointId());
+                statement.setString(5, reservation.resourceId());
+                statement.setString(6, reservation.state().name());
+                statement.setLong(7, reservation.offsetMillis());
+                statement.setLong(8, reservation.logicalSequence());
                 statement.addBatch();
             }
             statement.executeBatch();

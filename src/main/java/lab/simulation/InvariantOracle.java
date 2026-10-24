@@ -206,6 +206,9 @@ public class InvariantOracle {
                 case QUERY_CALLS -> list.add(checkQueryCalls(rule, ctx));
                 case VALID_EXTERNAL_ORDERS -> list.add(checkValidExternalOrders(rule, ctx));
                 case NO_DUPLICATE_EXTERNAL_ORDER -> list.add(checkNoDuplicateRule(rule, ctx));
+                case RESERVATION_STATE, HELD_COUNT, WAITING_COUNT, RESOURCE_AVAILABILITY,
+                     QUEUE_ORDER, QUEUE_EMPTY, WORLD_RESTART_CONSISTENT, SINGLE_CAPACITY ->
+                        list.add(checkResourceRuleUnavailable(rule));
             }
         }
         return list;
@@ -297,8 +300,16 @@ public class InvariantOracle {
                         String.valueOf(want), String.valueOf(actual), "");
     }
 
-    private OracleResult checkNoDuplicateRule(OracleRule rule, OracleContext ctx) {
-        int actual = confirmedOrdersOf(rule.arguments().get(0), ctx).size();
+    /**
+     * Part B 的资源 EXPECT 在 PR4 只完成 parse 期校验；运行时检查器由 PR5/PR6 接线。
+     * 接线之前 fail-closed：宁可让运行失败，也不静默 PASS。
+     */
+    private OracleResult checkResourceRuleUnavailable(OracleRule rule) {
+        return OracleResult.fail(rule.oracleId(), rule.ruleType().name(), "SUPPORTED",
+                "RESOURCE_ORACLE_NOT_AVAILABLE", "resource oracle 在 PR5/PR6 接线");
+    }
+
+    private OracleResult checkNoDuplicateRule(OracleRule rule, OracleContext ctx) {        int actual = confirmedOrdersOf(rule.arguments().get(0), ctx).size();
         return actual <= 1
                 ? OracleResult.pass(rule.oracleId(), "NO_DUPLICATE_EXTERNAL_ORDER",
                         "<=1", String.valueOf(actual))

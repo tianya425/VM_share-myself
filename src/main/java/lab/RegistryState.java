@@ -1,5 +1,7 @@
 package lab;
 
+import lab.simulation.resource.ResourceWorldSnapshot;
+
 import java.util.List;
 
 /**
@@ -10,15 +12,19 @@ import java.util.List;
  *
  * <p>构造时做深拷贝：五个集合一律 {@link List#copyOf}，WorkflowInstance 内部的
  * steps 列表也复制一份，因此持有者修改外部列表不会影响已构造的快照。
+ * 资源世界 {@link ResourceWorldSnapshot} 本身深不可变，只做 null 检查。
  *
- * <p>空状态用 {@link #empty()} 表示（五个集合都是空列表）。
+ * <p>空状态用 {@link #empty()} 表示（五个集合都是空列表、资源世界为空快照）。
+ *
+ * <p>兼容构造器（五个集合）等价于"资源世界为空快照"，供 Part A 的既有调用方使用。
  */
 public record RegistryState(
         List<Point> points,
         List<TransferApplication> applications,
         List<OutboxEntry> outbox,
         List<InboxEntry> inbox,
-        List<WorkflowInstance> workflows) {
+        List<WorkflowInstance> workflows,
+        ResourceWorldSnapshot resourceWorld) {
 
     public RegistryState {
         points = copyOf(points, "points");
@@ -26,13 +32,25 @@ public record RegistryState(
         outbox = copyOf(outbox, "outbox");
         inbox = copyOf(inbox, "inbox");
         workflows = copyWorkflows(workflows);
+        if (resourceWorld == null) {
+            throw new IllegalArgumentException("RegistryState.resourceWorld 不能为 null");
+        }
+    }
+
+    public RegistryState(List<Point> points,
+                         List<TransferApplication> applications,
+                         List<OutboxEntry> outbox,
+                         List<InboxEntry> inbox,
+                         List<WorkflowInstance> workflows) {
+        this(points, applications, outbox, inbox, workflows, ResourceWorldSnapshot.empty());
     }
 
     /**
      * 空状态。
      */
     public static RegistryState empty() {
-        return new RegistryState(List.of(), List.of(), List.of(), List.of(), List.of());
+        return new RegistryState(List.of(), List.of(), List.of(), List.of(), List.of(),
+                ResourceWorldSnapshot.empty());
     }
 
     private static <T> List<T> copyOf(List<T> values, String name) {

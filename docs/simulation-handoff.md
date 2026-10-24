@@ -135,7 +135,7 @@ SIMULATION_R1_VERIFICATION_PASS originalCases=30 validScenarios=3 invalidScenari
 - 证据格式升级到 `schemaVersion=2` 后，旧证据包不再通过新校验器；仓库内不跟踪旧证据包
 - 未连接真实 M4、AGV、PLC、MES
 - 不代表真实 Lab、容量或生产资格
-- Part B（`lab.simulation.resource.*`）未开始，`GATE-A=NOT_READY`
+- Part B 资源领域模型已接线（PR4：`lab.simulation.resource` 领域层 + 三类存储 + Parser 8 Action / 8 EXPECT）；资源运行时与资源场景未开始（PR5/PR6），未接线动作与资源 EXPECT 一律 fail-closed
 
 ## 声明
 

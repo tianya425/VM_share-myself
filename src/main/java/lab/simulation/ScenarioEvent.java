@@ -33,6 +33,16 @@ public record ScenarioEvent(
         APPLICATION_CALLBACK,
         OUTBOX_PROCESS,
         WORKFLOW_START,
-        WORKFLOW_ADVANCE
+        WORKFLOW_ADVANCE,
+
+        // Part B / PR4：资源领域动作（运行时分发在 PR5/PR6 接线）
+        DESTINATION_ADD,
+        SERVICE_POINT_ADD,
+        VIRTUAL_RESOURCE_ADD,
+        RESOURCE_SET,
+        RESERVATION_REQUEST,
+        RESERVATION_RELEASE,
+        RESERVATION_CANCEL,
+        WORLD_RESTART
     }
 }

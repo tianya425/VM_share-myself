@@ -806,3 +806,100 @@ SIMULATION_R1_VERIFICATION_PASS originalCases=30 validScenarios=3 invalidScenari
 | #3（验收/变异/交付） | 见 `delivery-receipt.txt` 的 source commit | — | 待合并；分支 `r1-verification` 已推送 |
 
 三个 PR 的完整 URL 与状态记录在 ZIP 外 `delivery-receipt.txt`（文档正文不写仓库账号名）。
+
+---
+
+## 九、PR4 资源领域记录（Part B / S5，2026-10-24）
+
+### 9.1 基线与范围
+
+| 项 | 值 |
+|---|---|
+| 基线 `main` | `439209e`（PR3 合并提交，GATE-A=PASS 绑定量） |
+| 分支 | `sim-02-resource-domain`，从 `439209e` 创建 |
+| 任务清单 | `S5-PartB-PR4-资源领域.md`（T1—T4） |
+| JDK | 21.0.12.1（`--release 21 -encoding UTF-8`，`major version: 65`） |
+
+### 9.2 先红证据
+
+RED-1（旧代码，资源包不存在）：`javac` 编译测试 → `exit 11`，错误形如
+`ResourceWorldChecks.java:693: error: cannot find symbol ... class Destination`。
+
+RED-2（骨架 API 全部 fail-closed）：编译通过后运行检查类 → 24 个具名 case 全部失败、退出码 1：
+
+```text
+RW-01 FAIL: UnsupportedOperationException: RESOURCE_REGISTRY_NOT_WIRED
+...
+RW-24 FAIL: UnsupportedOperationException: RESOURCE_REGISTRY_NOT_WIRED
+RESOURCE_WORLD_CASES_FAILED=24
+RESOURCE_WORLD_CASES_PASSED=0
+```
+
+### 9.3 实现清单
+
+| 层 | 内容 |
+|---|---|
+| 领域层（T2） | `lab.simulation.resource` 九个不可变类；容量固定 1；`reservationId="RSV-"+applicationId`；终态不可重开；快照深不可变、稳定排序、`empty()`、加载不交叉校验（写入时 fail-closed） |
+| 存储/Registry（T3） | `RegistryState.resourceWorld`；Memory/File/SQLite 在同一 `commitState` 保存五类 + 资源世界；SQLite `Migration 3 add resource tables`（4 张表，与 `schema_version` 同事务）；Registry 8 个资源入口 |
+| Parser（T4） | 8 个 Action、8 个 EXPECT；parse 期校验参数数量、枚举（`SCENARIO_ARGUMENT_VALUE`）、`HELD_COUNT/WAITING_COUNT` 非负整数 |
+| 运行时边界 | 未接线的资源 Action → `RESOURCE_ACTION_NOT_AVAILABLE`；未接线的资源 EXPECT → `RESOURCE_ORACLE_NOT_AVAILABLE`（fail-closed，不静默 PASS） |
+
+### 9.4 全量实测（退出码 0）
+
+```text
+RESOURCE_WORLD_CASES_PASSED=24
+RESOURCE_STORAGE_CASES_PASSED=6
+RESOURCE_PARSER_CASES_PASSED=7
+RELIABILITY_R1_CASES_PASSED=14
+SCENARIO_PARSER_CASES_PASSED=16
+CHECKS_PASSED=279
+CONCURRENCY_CHECKS_PASSED=8
+SIMULATION_RUNTIME_CASES_PASSED=18
+REPLAY_EVIDENCE_R1_CASES_PASSED=12
+CASES_TOTAL=30 CASES_PASSED=30 CASES_FAILED=0
+SIMULATION_R1_VERIFICATION_PASS originalCases=30 validScenarios=3 invalidScenarios=3 replay=1 evidenceBundles=5 realExternalWrites=0
+```
+
+### 9.5 D-13：Migration 3 的 golden 例外（唯一一次）
+
+新增 `Migration 3 add resource tables` 会改变 `migration status/list` 的观测输出。经 S0 裁决（D-13），仅同步两个 golden 的 5 行；两个 `.in` 与另外 28 个 case 零改动。
+
+**先红 diff（实测原文，摘录）**：
+
+```text
+CASE_DIFF_FAILED migration-basic
+-MIGRATION status version=2
+-MIGRATION list 2
++MIGRATION status version=3
++MIGRATION list 3
+ MIGRATION 1 create core tables
+ MIGRATION 2 add note column to applications
++MIGRATION 3 add resource tables
+...
+-MIGRATION status version=2
++MIGRATION status version=3
+CASE_DIFF_FAILED migration-persistence
+-MIGRATION status version=2
++MIGRATION status version=3
+CASES_TOTAL=30 CASES_PASSED=28 CASES_FAILED=2
+```
+
+**sha256**：
+
+| 文件 | 旧 | 新 |
+|---|---|---|
+| `cases/migration-basic.expected.txt` | `ca94b4ec830c86e301f3de374a29f88cc9afa90751c3ced942aa17641256bc85` | `426cb31535b0cad870987781ae0341795f87654010e3d351823abcedbde2bbd7` |
+| `cases/migration-persistence.expected.txt` | `c42e6cc6d1984a5d4214a0b01aac7aae6213e1200c21d1a0406434c819770d5f` | `9633c198b0d2483d314a2fe1822f5c0c03fca2be8114e6a9e3e3b7a8b676b5b3` |
+
+**转绿**：`CASES_TOTAL=30 CASES_PASSED=30 CASES_FAILED=0`。
+
+### 9.6 随 schema 版本前进的既有断言维护（计数不变）
+
+- `ReliabilityCloseoutChecks.caseR1Rel10`：只读实例 `currentVersion` 期望 2 → 3；
+- `RegistryChecks` R81/R82/R83/R85：`currentVersion` 2 → 3；R84：`migrationList` 大小 2 → 3，并把"第 2/3 条版本"合并为一条断言，保持 `CHECKS_PASSED=279` 不变。
+
+两处都只改与 schema 版本绑定的期望值，未放宽任何判定。
+
+### 9.7 未做（留给 PR5/PR6）
+
+资源 Action 分发表、`ReservationDecision` 按 eventId 观察、`WORLD_RESTART` 运行时重建、8 个资源 EXPECT 检查器、`ORC-RES-SYS-001..006`、6 个资源场景与 6 项资源变异（`RESOURCE_SCENARIO_CASES_PASSED=10` 终端线）。

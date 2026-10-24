@@ -52,7 +52,7 @@
 - 使用网络请求替代本地 Fake
 - 使用真实 `Thread.sleep` 等待逻辑时间到达
 - 使用系统当前时间作为场景业务结论的一部分
-- `GATE-A=PASS` 之前写任何 `lab.simulation.resource.*`（Part B 未开始）
+- 在 PR5/PR6 完成前，声称资源运行时 / 资源场景已可用（`RESOURCE_ACTION_NOT_AVAILABLE`、`RESOURCE_ORACLE_NOT_AVAILABLE` 为未接线的 fail-closed 标记）
 
 ## M4 不适用
 
@@ -81,7 +81,7 @@
 - 未连接真实数据库
 - 未执行任何真实外部写
 - 未执行 Lab 综合验证、Shadow、Canary、Site Acceptance、容量测试
-- Part B（`lab.simulation.resource.*`）未开始
+- Part B 资源领域模型已接线（PR4）；资源运行时 / 资源场景未开始
 
 ## 当前验证事实
 

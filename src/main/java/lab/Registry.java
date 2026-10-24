@@ -1,5 +1,15 @@
 package lab;
 
+import lab.simulation.resource.Destination;
+import lab.simulation.resource.Reservation;
+import lab.simulation.resource.ReservationDecision;
+import lab.simulation.resource.ReservationState;
+import lab.simulation.resource.ResourceAvailability;
+import lab.simulation.resource.ResourceWorldSnapshot;
+import lab.simulation.resource.ServicePoint;
+import lab.simulation.resource.VirtualResource;
+import lab.simulation.resource.VirtualResourceWorld;
+
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -19,6 +29,7 @@ public class Registry {
     private final Map<String, OutboxEntry> outbox = new HashMap<>();
     private final Map<String, InboxEntry> inbox = new HashMap<>();
     private final Map<String, WorkflowInstance> workflows = new HashMap<>();
+    private ResourceWorldSnapshot resourceWorld;
 
     public Registry(Storage storage) {
         this(storage, new FakeRcsAdapter(FakeRcsAdapter.Mode.ACCEPT), false);
@@ -48,6 +59,7 @@ public class Registry {
         for (WorkflowInstance w : loaded.workflows()) {
             workflows.put(w.applicationId(), w);
         }
+        this.resourceWorld = loaded.resourceWorld();
     }
 
     // ---------- point ----------
@@ -612,6 +624,177 @@ public class Registry {
                 overall);
     }
 
+    // ---------- resource（Part B / PR4：资源领域领域模型的事务入口） ----------
+
+    /**
+     * 新增 Destination：同 ID 同 name 幂等；同 ID 不同 name → {@code RESOURCE_DUPLICATE_CONFLICT}。
+     */
+    public synchronized Destination addDestination(String destinationId, String name) {
+        checkWritable();
+        checkId(destinationId);
+        checkName(name);
+
+        VirtualResourceWorld current = world();
+        Destination existing = current.findDestination(destinationId);
+        VirtualResourceWorld next = current.addDestination(new Destination(destinationId, name));
+        if (existing == null) {
+            commitWorld(next);
+        }
+        return existing != null ? existing : next.findDestination(destinationId);
+    }
+
+    /**
+     * 新增 ServicePoint：Destination 与 Registry Point 都必须已存在。
+     */
+    public synchronized ServicePoint addServicePoint(String servicePointId, String destinationId,
+                                                     String registryPointId, String name) {
+        checkWritable();
+        checkId(servicePointId);
+        checkId(destinationId);
+        checkId(registryPointId);
+        checkName(name);
+        if (!points.containsKey(registryPointId)) {
+            throw new RegistryException("UNKNOWN_POINT", registryPointId);
+        }
+
+        VirtualResourceWorld current = world();
+        ServicePoint existing = current.findServicePoint(servicePointId);
+        VirtualResourceWorld next = current.addServicePoint(
+                new ServicePoint(servicePointId, destinationId, registryPointId, name));
+        if (existing == null) {
+            commitWorld(next);
+        }
+        return existing != null ? existing : next.findServicePoint(servicePointId);
+    }
+
+    /**
+     * 新增 VirtualResource（容量固定 1，默认 ENABLED）。
+     */
+    public synchronized VirtualResource addVirtualResource(String resourceId, String servicePointId) {
+        checkWritable();
+        checkId(resourceId);
+        checkId(servicePointId);
+
+        VirtualResourceWorld current = world();
+        VirtualResource existing = current.findResource(resourceId);
+        VirtualResourceWorld next = current.addVirtualResource(new VirtualResource(resourceId, servicePointId));
+        if (existing == null) {
+            commitWorld(next);
+        }
+        return existing != null ? existing : next.findResource(resourceId);
+    }
+
+    /**
+     * 设置资源可用性：DISABLED 不驱逐 holder；ENABLED 且无 holder 时晋升队首。
+     */
+    public synchronized VirtualResource setVirtualResourceAvailability(String resourceId,
+                                                                       ResourceAvailability availability) {
+        checkWritable();
+        checkId(resourceId);
+        if (availability == null) {
+            throw new RegistryException("RESOURCE_INVALID_AVAILABILITY", resourceId);
+        }
+
+        VirtualResourceWorld current = world();
+        VirtualResourceWorld next = current.setAvailability(resourceId, availability);
+        if (next != current) {
+            commitWorld(next);
+        }
+        return next.findResource(resourceId);
+    }
+
+    /**
+     * 请求预约。
+     *
+     * <p>校验顺序：申请存在 → 申请为 CREATED → 资源/服务点/目的地引用链一致 →
+     * 终态不可重开 → 同目标幂等 / 不同目标冲突 → 容量与可用性决定 HELD 或 WAITING。
+     */
+    public synchronized ReservationDecision requestReservation(String applicationId,
+                                                               String destinationId,
+                                                               String servicePointId,
+                                                               String resourceId,
+                                                               long offsetMillis,
+                                                               long logicalSequence) {
+        checkWritable();
+        checkId(applicationId);
+        checkId(destinationId);
+        checkId(servicePointId);
+        checkId(resourceId);
+        if (offsetMillis < 0 || logicalSequence < 1) {
+            throw new RegistryException("RESERVATION_INVALID_ORDER", applicationId);
+        }
+
+        TransferApplication application = applications.get(applicationId);
+        if (application == null) {
+            throw new RegistryException("UNKNOWN_APPLICATION", applicationId);
+        }
+        if (application.state() != ApplicationState.CREATED) {
+            throw new RegistryException("RESERVATION_APPLICATION_STATE", applicationId);
+        }
+
+        VirtualResourceWorld current = world();
+        Reservation existing = current.findReservation(applicationId);
+        VirtualResourceWorld next = current.request(applicationId, destinationId, servicePointId,
+                resourceId, offsetMillis, logicalSequence);
+        if (existing == null) {
+            commitWorld(next);
+            Reservation created = next.findReservation(applicationId);
+            ReservationDecision.Outcome outcome = created.state() == ReservationState.HELD
+                    ? ReservationDecision.Outcome.HELD
+                    : ReservationDecision.Outcome.WAITING;
+            return new ReservationDecision(outcome, created);
+        }
+        return new ReservationDecision(ReservationDecision.Outcome.IDEMPOTENT, existing);
+    }
+
+    /**
+     * 释放 HELD 预约；成功后晋升该资源队首。
+     */
+    public synchronized Reservation releaseReservation(String applicationId) {
+        checkWritable();
+        checkId(applicationId);
+
+        VirtualResourceWorld next = world().release(applicationId);
+        commitWorld(next);
+        return next.findReservation(applicationId);
+    }
+
+    /**
+     * 取消 HELD / WAITING 预约；取消 HELD 后晋升该资源队首。
+     */
+    public synchronized Reservation cancelReservation(String applicationId) {
+        checkWritable();
+        checkId(applicationId);
+
+        VirtualResourceWorld next = world().cancel(applicationId);
+        commitWorld(next);
+        return next.findReservation(applicationId);
+    }
+
+    /**
+     * 当前资源世界快照（深不可变）。
+     */
+    public synchronized ResourceWorldSnapshot resourceWorldSnapshot() {
+        return resourceWorld;
+    }
+
+    // ---------- 资源世界的提交合同 ----------
+
+    private VirtualResourceWorld world() {
+        return new VirtualResourceWorld(resourceWorld);
+    }
+
+    /**
+     * 与其它写入口相同：先改候选快照，再单次 commitState，提交成功后才发布到内存。
+     * 提交失败时内存与已提交状态都保持原样，不留幽灵预约。
+     */
+    private void commitWorld(VirtualResourceWorld next) {
+        CandidateState candidate = candidate();
+        candidate.resourceWorld = next.snapshot();
+        storage.commitState(candidate.toState());
+        publish(candidate);
+    }
+
     // ---------- 提交合同（T4：候选快照 → 单次 commitState → 成功后发布内存） ----------
 
     /**
@@ -627,6 +810,7 @@ public class Registry {
         private final List<OutboxEntry> outbox;
         private final List<InboxEntry> inbox;
         private final List<WorkflowInstance> workflows;
+        private ResourceWorldSnapshot resourceWorld;
 
         CandidateState(RegistryState committed) {
             this.points = new ArrayList<>(committed.points());
@@ -634,10 +818,11 @@ public class Registry {
             this.outbox = new ArrayList<>(committed.outbox());
             this.inbox = new ArrayList<>(committed.inbox());
             this.workflows = new ArrayList<>(committed.workflows());
+            this.resourceWorld = committed.resourceWorld();
         }
 
         RegistryState toState() {
-            return new RegistryState(points, applications, outbox, inbox, workflows);
+            return new RegistryState(points, applications, outbox, inbox, workflows, resourceWorld);
         }
     }
 
@@ -646,7 +831,8 @@ public class Registry {
                 new ArrayList<>(applications.values()),
                 new ArrayList<>(outbox.values()),
                 new ArrayList<>(inbox.values()),
-                new ArrayList<>(workflows.values()));
+                new ArrayList<>(workflows.values()),
+                resourceWorld);
     }
 
     private CandidateState candidate() {
@@ -677,6 +863,7 @@ public class Registry {
         for (WorkflowInstance workflow : candidate.workflows) {
             workflows.put(workflow.applicationId(), workflow);
         }
+        resourceWorld = candidate.resourceWorld;
     }
 
     // ---------- 候选态上的列表操作 ----------

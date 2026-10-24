@@ -126,6 +126,9 @@ public class SimulationRuntime {
             case OUTBOX_PROCESS -> target.outboxProcess();
             case WORKFLOW_START -> target.workflowStart(args.get(0));
             case WORKFLOW_ADVANCE -> target.workflowAdvance(args.get(0));
+            case DESTINATION_ADD, SERVICE_POINT_ADD, VIRTUAL_RESOURCE_ADD, RESOURCE_SET,
+                 RESERVATION_REQUEST, RESERVATION_RELEASE, RESERVATION_CANCEL, WORLD_RESTART ->
+                    throw new RegistryException("RESOURCE_ACTION_NOT_AVAILABLE", event.eventId());
         }
     }
 

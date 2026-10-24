@@ -1,6 +1,9 @@
 package lab.simulation;
 
 import lab.Registry;
+import lab.simulation.resource.Reservation;
+import lab.simulation.resource.ReservationDecision;
+import lab.simulation.resource.ResourceWorldSnapshot;
 
 /**
  * SimulationTarget 的 Registry 实现。
@@ -58,5 +61,52 @@ public class RegistrySimulationTarget implements SimulationTarget {
     @Override
     public void workflowAdvance(String applicationId) {
         registry.advanceWorkflow(applicationId);
+    }
+
+    // ---------- Part B / PR4：资源领域 ----------
+
+    @Override
+    public void destinationAdd(String destinationId, String name) {
+        registry.addDestination(destinationId, name);
+    }
+
+    @Override
+    public void servicePointAdd(String servicePointId, String destinationId,
+                                String registryPointId, String name) {
+        registry.addServicePoint(servicePointId, destinationId, registryPointId, name);
+    }
+
+    @Override
+    public void virtualResourceAdd(String resourceId, String servicePointId) {
+        registry.addVirtualResource(resourceId, servicePointId);
+    }
+
+    @Override
+    public void resourceSetAvailability(String resourceId, String availability) {
+        registry.setVirtualResourceAvailability(resourceId,
+                lab.simulation.resource.ResourceAvailability.valueOf(availability));
+    }
+
+    @Override
+    public ReservationDecision reservationRequest(String applicationId, String destinationId,
+                                                  String servicePointId, String resourceId,
+                                                  long offsetMillis, long logicalSequence) {
+        return registry.requestReservation(applicationId, destinationId, servicePointId,
+                resourceId, offsetMillis, logicalSequence);
+    }
+
+    @Override
+    public Reservation reservationRelease(String applicationId) {
+        return registry.releaseReservation(applicationId);
+    }
+
+    @Override
+    public Reservation reservationCancel(String applicationId) {
+        return registry.cancelReservation(applicationId);
+    }
+
+    @Override
+    public ResourceWorldSnapshot resourceWorldSnapshot() {
+        return registry.resourceWorldSnapshot();
     }
 }
