@@ -7,7 +7,9 @@ import lab.MigrationRunner;
 import lab.Point;
 import lab.RegistryState;
 import lab.SqliteStorage;
+import lab.TransferApplication;
 
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
@@ -45,7 +47,7 @@ public final class ResourceStorageChecks {
                 throw new IllegalStateException("无法创建临时目录", e);
             }
             run("STO-01", "MemoryStorage：同一状态保存五类 + resourceWorld，读取一致且深不可变", ResourceStorageChecks::sto01);
-            run("STO-02", "FileStorage：resources.txt 与五类文件同批原子落盘，重读规范快照一致", ResourceStorageChecks::sto02);
+            run("STO-02", "FileStorage：registry-state.txt 单快照原子落盘；旧六文件只读回退", ResourceStorageChecks::sto02);
             run("STO-03", "SqliteStorage：Migration 3 后四张资源表读回一致，version=3", ResourceStorageChecks::sto03);
             run("STO-04", "Migration 3 注入失败：version 停在 2、四张表不存在、autoCommit 恢复", ResourceStorageChecks::sto04);
             run("STO-05", "readonly 不跑 Migration：v2 库只读打开不建表、字节不变，可写打开才升到 3", ResourceStorageChecks::sto05);
@@ -94,17 +96,54 @@ public final class ResourceStorageChecks {
         FileStorage storage = new FileStorage(dir);
         storage.commitState(sampleState(world));
 
-        require(Files.isRegularFile(dir.resolve("resources.txt")),
-                "FileStorage 未写出 resources.txt");
+        // §11：权威文件是单个 registry-state.txt，不再写旧六文件。
+        require(Files.isRegularFile(dir.resolve("registry-state.txt")),
+                "FileStorage 未写出 registry-state.txt");
         for (String name : List.of("points.txt", "applications.txt", "outbox.txt",
                 "inbox.txt", "workflows.txt", "resources.txt")) {
-            require(Files.isRegularFile(dir.resolve(name)), "缺少存储文件 " + name);
+            require(!Files.exists(dir.resolve(name)),
+                    "单快照提交不应再写旧六文件：" + name);
         }
 
         RegistryState loaded = new FileStorage(dir).loadState();
         require(loaded.points().size() == 1, "points=" + loaded.points().size() + " 期望=1");
         require(loaded.resourceWorld().canonicalText().equals(world.canonicalText()),
                 "FileStorage 读回的资源世界不一致：\n" + loaded.resourceWorld().canonicalText());
+
+        // §11.3：新快照不存在时回退读旧六文件（LEGACY_READ_FALLBACK_ONLY）。
+        Path legacyDir = tmpDir.resolve("sto02-legacy");
+        Files.createDirectories(legacyDir);
+        Files.writeString(legacyDir.resolve("points.txt"),
+                "P|P01|缓冲点\n", StandardCharsets.UTF_8);
+        Files.writeString(legacyDir.resolve("applications.txt"),
+                "A|APP-001|P01|P02|CREATED|\n", StandardCharsets.UTF_8);
+        Files.writeString(legacyDir.resolve("outbox.txt"), "", StandardCharsets.UTF_8);
+        Files.writeString(legacyDir.resolve("inbox.txt"), "", StandardCharsets.UTF_8);
+        Files.writeString(legacyDir.resolve("workflows.txt"), "", StandardCharsets.UTF_8);
+        Files.writeString(legacyDir.resolve("resources.txt"),
+                "D|D01|一号目的地\n"
+                        + "S|SP01|D01|P01\n"
+                        + "R|R01|SP01|ENABLED\n"
+                        + "V|RSV-APP-001|APP-001|D01|SP01|R01|HELD|0|10\n",
+                StandardCharsets.UTF_8);
+
+        RegistryState legacyLoaded = new FileStorage(legacyDir).loadState();
+        require(legacyLoaded.points().size() == 1,
+                "legacy points=" + legacyLoaded.points().size() + " 期望=1");
+        require(legacyLoaded.resourceWorld().canonicalText().equals(world.canonicalText()),
+                "legacy 读回的资源世界不一致：\n" + legacyLoaded.resourceWorld().canonicalText());
+        require(!Files.exists(legacyDir.resolve("registry-state.txt")),
+                "legacy 读取阶段不应创建新快照");
+
+        // 第一次成功提交写出新快照；旧六文件不自动删除。
+        new FileStorage(legacyDir).commitState(legacyLoaded);
+        require(Files.isRegularFile(legacyDir.resolve("registry-state.txt")),
+                "第一次成功提交未写出 registry-state.txt");
+        for (String name : List.of("points.txt", "applications.txt", "outbox.txt",
+                "inbox.txt", "workflows.txt", "resources.txt")) {
+            require(Files.isRegularFile(legacyDir.resolve(name)),
+                    "提交后不得自动删除旧六文件：" + name);
+        }
     }
 
     // ================= STO-03 =================
@@ -232,7 +271,8 @@ public final class ResourceStorageChecks {
 
     private static RegistryState sampleState(ResourceWorldSnapshot world) {
         return new RegistryState(List.of(new Point("P01", "缓冲点")),
-                List.of(), List.of(), List.of(), List.of(), world);
+                List.of(new TransferApplication("APP-001", "P01", "P02")),
+                List.of(), List.of(), List.of(), world);
     }
 
     private static boolean tableExists(Connection conn, String table) throws SQLException {

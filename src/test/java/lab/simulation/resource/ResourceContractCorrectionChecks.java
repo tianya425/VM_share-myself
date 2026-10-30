@@ -7,6 +7,7 @@ import lab.Point;
 import lab.Registry;
 import lab.RegistryException;
 import lab.RegistryState;
+import lab.StateFileOps;
 import lab.Storage;
 import lab.TransferApplication;
 import lab.simulation.OracleResult;
@@ -19,10 +20,16 @@ import lab.simulation.ScenarioPackage;
 import lab.simulation.ScenarioParser;
 import lab.simulation.ScenarioValidationException;
 
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 /**
@@ -305,8 +312,7 @@ public final class ResourceContractCorrectionChecks {
         ResourceWorldSnapshot world = baselineWorld(List.of(
                 reservation("RSV-APP-999", "APP-999", "D01", "SP01", "R01", ReservationState.HELD, 0, 10)));
         RegistryState state = loadState(baselinePoints(), baselineApps(), world);
-        require(loadFailure(state) != null,
-                "Reservation 引用不存在的 Application 未导致 load 失败 expected=失败 actual=成功加载");
+        expectLoadFailure(state, "Reservation 引用不存在的 Application");
     }
 
     // ================= R1-LOAD-02 =================
@@ -314,18 +320,18 @@ public final class ResourceContractCorrectionChecks {
     private static void r1Load02() {
         ResourceWorldSnapshot w1 = baselineWorld(List.of(
                 reservation("RSV-APP-001", "APP-001", "D01", "SP01", "R99", ReservationState.HELD, 0, 10)));
-        require(loadFailure(loadState(baselinePoints(), baselineApps(), w1)) != null,
-                "Reservation 引用不存在的 Resource 未导致 load 失败 expected=失败 actual=成功加载");
+        expectLoadFailure(loadState(baselinePoints(), baselineApps(), w1),
+                "Reservation 引用不存在的 Resource");
 
         ResourceWorldSnapshot w2 = baselineWorld(List.of(
                 reservation("RSV-APP-001", "APP-001", "D99", "SP01", "R01", ReservationState.HELD, 0, 10)));
-        require(loadFailure(loadState(baselinePoints(), baselineApps(), w2)) != null,
-                "Reservation 引用不存在的 Destination 未导致 load 失败 expected=失败 actual=成功加载");
+        expectLoadFailure(loadState(baselinePoints(), baselineApps(), w2),
+                "Reservation 引用不存在的 Destination");
 
         ResourceWorldSnapshot w3 = baselineWorld(List.of(
                 reservation("RSV-APP-001", "APP-001", "D01", "SP99", "R01", ReservationState.HELD, 0, 10)));
-        require(loadFailure(loadState(baselinePoints(), baselineApps(), w3)) != null,
-                "Reservation 引用不存在的 ServicePoint 未导致 load 失败 expected=失败 actual=成功加载");
+        expectLoadFailure(loadState(baselinePoints(), baselineApps(), w3),
+                "Reservation 引用不存在的 ServicePoint");
     }
 
     // ================= R1-LOAD-03 =================
@@ -334,8 +340,8 @@ public final class ResourceContractCorrectionChecks {
         ResourceWorldSnapshot world = baselineWorld(List.of(
                 reservation("RSV-APP-001", "APP-001", "D01", "SP01", "R01", ReservationState.HELD, 0, 10),
                 reservation("RSV-APP-001", "APP-001", "D01", "SP01", "R01", ReservationState.WAITING, 20, 10)));
-        require(loadFailure(loadState(baselinePoints(), baselineApps(), world)) != null,
-                "同一 application 两条非终态 Reservation 未导致 load 失败 expected=失败 actual=成功加载");
+        expectLoadFailure(loadState(baselinePoints(), baselineApps(), world),
+                "同一 application 两条非终态 Reservation");
     }
 
     // ================= R1-LOAD-04 =================
@@ -347,17 +353,39 @@ public final class ResourceContractCorrectionChecks {
         List<TransferApplication> apps = List.of(
                 new TransferApplication("APP-001", "P01", "P02"),
                 new TransferApplication("APP-002", "P01", "P02"));
-        require(loadFailure(loadState(baselinePoints(), apps, world)) != null,
-                "同一 resource 两条 HELD Reservation 未导致 load 失败 expected=失败 actual=成功加载");
+        expectLoadFailure(loadState(baselinePoints(), apps, world),
+                "同一 resource 两条 HELD Reservation");
     }
 
     // ================= R1-LOAD-05 =================
 
-    private static void r1Load05() {
+    private static void r1Load05() throws Exception {
+        // §8.5 之后 Reservation 构造器已拒绝错误公式；夹具先提交一份合法快照，
+        // 再只在序列化文本里篡改 reservationId，使失败真正发生在 loadState 阶段，
+        // 而不是在测试构造 Reservation 夹具时。
+        Path dir = tmpDir.resolve("r1-load-05");
         ResourceWorldSnapshot world = baselineWorld(List.of(
-                reservation("RSV-WRONG", "APP-001", "D01", "SP01", "R01", ReservationState.HELD, 0, 10)));
-        require(loadFailure(loadState(baselinePoints(), baselineApps(), world)) != null,
+                reservation("APP-001", ReservationState.HELD, 0, 10)));
+        new FileStorage(dir).commitState(loadState(baselinePoints(), baselineApps(), world));
+
+        Path snapshot = dir.resolve("registry-state.txt");
+        String text = Files.readString(snapshot, StandardCharsets.UTF_8);
+        String tampered = text.replace("V|RSV-APP-001|", "V|RSV-WRONG|");
+        require(!tampered.equals(text), "夹具：registry-state.txt 中未找到可篡改的预约行");
+        Files.writeString(snapshot, tampered, StandardCharsets.UTF_8);
+
+        Throwable failure = capture(() -> new FileStorage(dir).loadState());
+        require(failure != null,
                 "reservationId 公式错误未导致 load 失败 expected=失败 actual=成功加载");
+        require(failure instanceof RegistryException,
+                "reservationId 公式错误：异常类型=" + failure.getClass().getSimpleName()
+                        + " expected=RegistryException");
+        RegistryException exception = (RegistryException) failure;
+        require(exception.code().equals("RESOURCE_STATE_INVALID"),
+                "reservationId 公式错误：code=" + exception.code()
+                        + " expected=RESOURCE_STATE_INVALID");
+        require(exception.detail().contains("rule=R11_RESERVATION_ID_FORMULA"),
+                "reservationId 公式错误：detail=" + exception.detail());
     }
 
     // ================= R1-LOAD-06 =================
@@ -368,8 +396,8 @@ public final class ResourceContractCorrectionChecks {
                 List.of(new ServicePoint("SP01", "D01", "P99")),
                 List.of(new VirtualResource("R01", "SP01")),
                 List.of());
-        require(loadFailure(loadState(baselinePoints(), baselineApps(), world)) != null,
-                "ServicePoint 引用不存在的 Registry Point 未导致 load 失败 expected=失败 actual=成功加载");
+        expectLoadFailure(loadState(baselinePoints(), baselineApps(), world),
+                "ServicePoint 引用不存在的 Registry Point");
     }
 
     // ================= R1-ORC-01 =================
@@ -589,49 +617,85 @@ public final class ResourceContractCorrectionChecks {
 
     // ================= R1-STORE-01 =================
 
-    private static void r1Store01() {
-        // 合同（REP-R1-11）：FileStorage 必须提供可注入 StateFileOps（writeAndSync/atomicMove）
-        // 的整状态原子提交机制，使「最终原子切换失败 → 重启得到完整旧状态」可被注入验证。
-        // 反射锁机制存在性：构造器接收 StateFileOps 等价接口，或声明了该接口类型的字段。
-        boolean hasInjectableCtor = false;
-        for (java.lang.reflect.Constructor<?> ctor : FileStorage.class.getDeclaredConstructors()) {
-            for (Class<?> param : ctor.getParameterTypes()) {
-                if (declaresOpsMethods(param)) {
-                    hasInjectableCtor = true;
-                }
-            }
-        }
-        boolean hasOpsField = false;
-        for (java.lang.reflect.Field field : FileStorage.class.getDeclaredFields()) {
-            if (declaresOpsMethods(field.getType())) {
-                hasOpsField = true;
-            }
-        }
-        require(hasInjectableCtor || hasOpsField,
-                "缺少可注入 StateFileOps（writeAndSync/atomicMove）机制 expected=存在（构造器参数或字段类型） actual=无");
+    private static void r1Store01() throws Exception {
+        // 行为级验证（§11.4/§11.6）：注入 atomicMove 抛 IOException，
+        // 最终原子切换失败 → 重启必须得到完整旧状态，且旧 registry-state.txt 字节不变。
+        Path dir = tmpDir.resolve("r1-store-01");
+        Registry seed = new Registry(new FileStorage(dir));
+        seedChain(seed);
+        String oldCanonical = canonical(seed);
+        byte[] oldBytes = Files.readAllBytes(dir.resolve("registry-state.txt"));
+
+        FailingStateFileOps ops = new FailingStateFileOps();
+        Registry registry = new Registry(new FileStorage(dir, ops));
+        String inMemoryBefore = canonical(registry);
+        require(inMemoryBefore.equals(oldCanonical),
+                "前置：重启后内存快照应等于旧状态");
+        require(heldOf(registry, "R01").isEmpty() && queueOf(registry, "R01").isEmpty(),
+                "前置：holder/queue 应为空");
+
+        ops.failNextAtomicMove();
+        expectCommitFailure(() -> registry.addDestination("D02", "二号目的地"),
+                "R1-STORE-01 最终原子切换失败");
+
+        // operationResult=FAIL；inMemoryCanonicalSnapshot=UNCHANGED；ghostEntity/Decision=NONE。
+        require(canonical(registry).equals(inMemoryBefore),
+                "最终原子切换失败后内存快照变了（inMemoryCanonicalSnapshot=CHANGED）");
+        require(destinations(registry).size() == 1,
+                "最终原子切换失败后内存出现幽灵 Destination：" + destinations(registry).size());
+        require(heldOf(registry, "R01").isEmpty() && queueOf(registry, "R01").isEmpty(),
+                "最终原子切换失败后 holder/queue 变了");
+        require(Arrays.equals(Files.readAllBytes(dir.resolve("registry-state.txt")), oldBytes),
+                "最终原子切换失败后旧 registry-state.txt 字节变了");
+        require(!hasStagingFile(dir),
+                "最终原子切换失败后残留可加载的 staging 文件");
+
+        Registry restarted = new Registry(new FileStorage(dir));
+        require(canonical(restarted).equals(oldCanonical),
+                "最终原子切换失败后重启快照=" + canonical(restarted)
+                        + " expected=OLD_STATE=" + oldCanonical);
+        require(destinations(restarted).size() == 1,
+                "最终原子切换失败后重启出现幽灵 Destination：" + destinations(restarted).size());
+        require(reservations(restarted).isEmpty(),
+                "最终原子切换失败后重启出现幽灵 Reservation");
     }
 
     // ================= R1-STORE-02 =================
 
-    private static void r1Store02() {
-        // 合同：FileStorage 必须改为单快照 registry-state.txt 提交（而非六文件逐个替换），
-        // 使 staging 写失败后无正式新状态、无可加载 staging 可在单快照上成立。
-        // 反射锁机制存在性：存在 registry-state.txt 相关字段或提交方法。
-        boolean hasSingleSnapshot = false;
-        for (java.lang.reflect.Field field : FileStorage.class.getDeclaredFields()) {
-            String name = field.getName().toLowerCase();
-            if (name.contains("registry") || name.contains("snapshot")) {
-                hasSingleSnapshot = true;
-            }
-        }
-        for (java.lang.reflect.Method method : FileStorage.class.getDeclaredMethods()) {
-            String name = method.getName().toLowerCase();
-            if (name.contains("registry") || name.contains("snapshot")) {
-                hasSingleSnapshot = true;
-            }
-        }
-        require(hasSingleSnapshot,
-                "缺少单快照 registry-state.txt 提交机制 expected=存在（registry/snapshot 相关字段或方法） actual=六文件分散提交");
+    private static void r1Store02() throws Exception {
+        // 行为级验证（§11/§11.6）：注入 staging 写失败，
+        // 无正式新状态、无可加载 staging，重启得到完整旧状态。
+        Path dir = tmpDir.resolve("r1-store-02");
+        Registry seed = new Registry(new FileStorage(dir));
+        seedChain(seed);
+        String oldCanonical = canonical(seed);
+        byte[] oldBytes = Files.readAllBytes(dir.resolve("registry-state.txt"));
+
+        FailingStateFileOps ops = new FailingStateFileOps();
+        Registry registry = new Registry(new FileStorage(dir, ops));
+        String inMemoryBefore = canonical(registry);
+
+        ops.failNextWrite();
+        expectCommitFailure(() -> registry.addDestination("D02", "二号目的地"),
+                "R1-STORE-02 staging 写失败");
+
+        require(canonical(registry).equals(inMemoryBefore),
+                "staging 写失败后内存快照变了（inMemoryCanonicalSnapshot=CHANGED）");
+        require(destinations(registry).size() == 1,
+                "staging 写失败后内存出现幽灵 Destination：" + destinations(registry).size());
+        require(heldOf(registry, "R01").isEmpty() && queueOf(registry, "R01").isEmpty(),
+                "staging 写失败后 holder/queue 变了");
+        require(Arrays.equals(Files.readAllBytes(dir.resolve("registry-state.txt")), oldBytes),
+                "staging 写失败后正式 registry-state.txt 字节变了");
+        require(!hasStagingFile(dir),
+                "staging 写失败后残留可加载的 staging 文件");
+
+        Registry restarted = new Registry(new FileStorage(dir));
+        require(canonical(restarted).equals(oldCanonical),
+                "staging 写失败后重启快照=" + canonical(restarted)
+                        + " expected=OLD_STATE=" + oldCanonical);
+        require(destinations(restarted).size() == 1,
+                "staging 写失败后重启出现幽灵 Destination：" + destinations(restarted).size());
     }
 
     // ================= R1-STORE-03 =================
@@ -646,6 +710,13 @@ public final class ResourceContractCorrectionChecks {
         require(canonical(registry).equals(before), "addDestination 提交失败后快照变了");
         require(destinations(registry).size() == 1,
                 "Destination 条目数=" + destinations(registry).size() + " expected=1（无幽灵对象）");
+        Registry restarted = new Registry(storage);
+        require(canonical(restarted).equals(before),
+                "addDestination 提交失败后重启快照变了（restartedCanonicalSnapshot != OLD_STATE）");
+        require(destinations(restarted).size() == 1,
+                "addDestination 提交失败后重启出现幽灵 Destination：" + destinations(restarted).size());
+        require(heldOf(restarted, "R01").isEmpty() && queueOf(restarted, "R01").isEmpty(),
+                "addDestination 提交失败后重启 holder/queue 变了");
     }
 
     // ================= R1-STORE-04 =================
@@ -661,6 +732,13 @@ public final class ResourceContractCorrectionChecks {
         require(canonical(registry).equals(before), "addServicePoint 提交失败后快照变了");
         require(servicePoints(registry).size() == 1,
                 "ServicePoint 条目数=" + servicePoints(registry).size() + " expected=1（无幽灵对象）");
+        Registry restarted = new Registry(storage);
+        require(canonical(restarted).equals(before),
+                "addServicePoint 提交失败后重启快照变了（restartedCanonicalSnapshot != OLD_STATE）");
+        require(servicePoints(restarted).size() == 1,
+                "addServicePoint 提交失败后重启出现幽灵 ServicePoint：" + servicePoints(restarted).size());
+        require(heldOf(restarted, "R01").isEmpty() && queueOf(restarted, "R01").isEmpty(),
+                "addServicePoint 提交失败后重启 holder/queue 变了");
     }
 
     // ================= R1-STORE-05 =================
@@ -675,6 +753,13 @@ public final class ResourceContractCorrectionChecks {
         require(canonical(registry).equals(before), "addResource 提交失败后快照变了");
         require(resources(registry).size() == 1,
                 "VirtualResource 条目数=" + resources(registry).size() + " expected=1（无幽灵对象）");
+        Registry restarted = new Registry(storage);
+        require(canonical(restarted).equals(before),
+                "addResource 提交失败后重启快照变了（restartedCanonicalSnapshot != OLD_STATE）");
+        require(resources(restarted).size() == 1,
+                "addResource 提交失败后重启出现幽灵 VirtualResource：" + resources(restarted).size());
+        require(heldOf(restarted, "R01").isEmpty() && queueOf(restarted, "R01").isEmpty(),
+                "addResource 提交失败后重启 holder/queue 变了");
     }
 
     // ================= R1-STORE-06 =================
@@ -691,6 +776,14 @@ public final class ResourceContractCorrectionChecks {
         require(resource(registry, "R01").availability() == ResourceAvailability.ENABLED,
                 "setAvailability 提交失败后可用性=" + resource(registry, "R01").availability()
                         + " expected=ENABLED");
+        Registry restarted = new Registry(storage);
+        require(canonical(restarted).equals(before),
+                "setAvailability 提交失败后重启快照变了（restartedCanonicalSnapshot != OLD_STATE）");
+        require(resource(restarted, "R01").availability() == ResourceAvailability.ENABLED,
+                "setAvailability 提交失败后重启可用性=" + resource(restarted, "R01").availability()
+                        + " expected=ENABLED");
+        require(heldOf(restarted, "R01").isEmpty() && queueOf(restarted, "R01").isEmpty(),
+                "setAvailability 提交失败后重启 holder/queue 变了");
     }
 
     // ================= R1-STORE-07 =================
@@ -706,6 +799,13 @@ public final class ResourceContractCorrectionChecks {
         require(canonical(registry).equals(before), "request 提交失败后快照变了");
         require(reservations(registry).isEmpty(),
                 "request 提交失败却出现预约幽灵状态：" + reservations(registry).size());
+        Registry restarted = new Registry(storage);
+        require(canonical(restarted).equals(before),
+                "request 提交失败后重启快照变了（restartedCanonicalSnapshot != OLD_STATE）");
+        require(reservations(restarted).isEmpty(),
+                "request 提交失败后重启出现预约幽灵状态（ghostDecision/ghostEntity != NONE）");
+        require(heldOf(restarted, "R01").isEmpty() && queueOf(restarted, "R01").isEmpty(),
+                "request 提交失败后重启 holder/queue 变了");
     }
 
     // ================= R1-STORE-08 =================
@@ -726,6 +826,14 @@ public final class ResourceContractCorrectionChecks {
                 "release 提交失败后 HELD=" + heldOf(registry, "R01") + " expected=[APP-009]");
         require(queueOf(registry, "R01").equals(List.of("APP-001")),
                 "release 提交失败后队列=" + queueOf(registry, "R01") + " expected=[APP-001]");
+        Registry restarted = new Registry(storage);
+        require(canonical(restarted).equals(before),
+                "release 提交失败后重启快照变了（restartedCanonicalSnapshot != OLD_STATE）");
+        require(stateOf(restarted, "APP-009") == ReservationState.HELD,
+                "release 提交失败后重启 holder=" + stateOf(restarted, "APP-009") + " expected=HELD");
+        require(heldOf(restarted, "R01").equals(List.of("APP-009"))
+                        && queueOf(restarted, "R01").equals(List.of("APP-001")),
+                "release 提交失败后重启 holder/queue 变了");
     }
 
     // ================= R1-STORE-09 =================
@@ -746,6 +854,14 @@ public final class ResourceContractCorrectionChecks {
                 "cancel 提交失败后 HELD=" + heldOf(registry, "R01") + " expected=[APP-009]");
         require(queueOf(registry, "R01").equals(List.of("APP-001")),
                 "cancel 提交失败后队列=" + queueOf(registry, "R01") + " expected=[APP-001]");
+        Registry restarted = new Registry(storage);
+        require(canonical(restarted).equals(before),
+                "cancel 提交失败后重启快照变了（restartedCanonicalSnapshot != OLD_STATE）");
+        require(stateOf(restarted, "APP-001") == ReservationState.WAITING,
+                "cancel 提交失败后重启状态=" + stateOf(restarted, "APP-001") + " expected=WAITING");
+        require(heldOf(restarted, "R01").equals(List.of("APP-009"))
+                        && queueOf(restarted, "R01").equals(List.of("APP-001")),
+                "cancel 提交失败后重启 holder/queue 变了");
     }
 
     // ================= R1-STORE-10 =================
@@ -770,6 +886,18 @@ public final class ResourceContractCorrectionChecks {
                 "promotion 提交失败后可用性=" + resource(registry, "R01").availability() + " expected=DISABLED");
         require(stateOf(registry, "APP-001") == ReservationState.WAITING,
                 "promotion 提交失败后 APP-001=" + stateOf(registry, "APP-001") + " expected=WAITING");
+        Registry restarted = new Registry(storage);
+        require(canonical(restarted).equals(before),
+                "promotion 提交失败后重启快照变了（restartedCanonicalSnapshot != OLD_STATE）");
+        require(resource(restarted, "R01").availability() == ResourceAvailability.DISABLED,
+                "promotion 提交失败后重启可用性=" + resource(restarted, "R01").availability()
+                        + " expected=DISABLED");
+        require(stateOf(restarted, "APP-001") == ReservationState.WAITING,
+                "promotion 提交失败后重启 APP-001=" + stateOf(restarted, "APP-001")
+                        + " expected=WAITING");
+        require(heldOf(restarted, "R01").isEmpty()
+                        && queueOf(restarted, "R01").equals(List.of("APP-001")),
+                "promotion 提交失败后重启 holder/queue 变了");
     }
 
     // ================= 夹具：Registry =================
@@ -903,10 +1031,40 @@ public final class ResourceContractCorrectionChecks {
         return new RegistryState(points, apps, List.of(), List.of(), List.of(), world);
     }
 
+    /**
+     * 注入非法快照：Storage.loadState() 原样返回该状态（绕过 commit 校验），
+     * 让失败发生在 Registry 构造 / load 校验阶段，而不是测试夹具的 commit 阶段。
+     */
     private static Throwable loadFailure(RegistryState state) {
-        MemoryStorage storage = new MemoryStorage();
-        storage.commitState(state);
-        return capture(() -> new Registry(storage));
+        Storage stub = new Storage() {
+            @Override
+            public RegistryState loadState() {
+                return state;
+            }
+
+            @Override
+            public void commitState(RegistryState next) {
+                throw new AssertionError("非法快照不应进入 commitState");
+            }
+        };
+        return capture(() -> new Registry(stub));
+    }
+
+    private static void expectLoadFailure(RegistryState state, String label) {
+        Throwable failure = loadFailure(state);
+        require(failure != null,
+                label + " 未导致 load/Registry 构造失败 expected=失败 actual=成功加载");
+        require(failure instanceof RegistryException,
+                label + "：异常类型=" + failure.getClass().getSimpleName()
+                        + " expected=RegistryException");
+        RegistryException exception = (RegistryException) failure;
+        require(exception.code().equals("RESOURCE_STATE_INVALID"),
+                label + "：code=" + exception.code() + " expected=RESOURCE_STATE_INVALID");
+        require(exception.detail().contains("rule=")
+                        && exception.detail().contains(";entity=")
+                        && exception.detail().contains(";field=")
+                        && exception.detail().contains(";actual="),
+                label + "：detail 形态=" + exception.detail());
     }
 
     // ================= 夹具：Oracle =================
@@ -1100,6 +1258,65 @@ public final class ResourceContractCorrectionChecks {
         require(failure != null, label + "：未抛异常 expected=INJECTED_COMMIT_FAILURE actual=无异常");
         require("INJECTED_COMMIT_FAILURE".equals(failure.getMessage()),
                 label + "：异常=" + failure + " expected=INJECTED_COMMIT_FAILURE");
+    }
+
+    /** 注入文件操作失败后，提交必须抛出异常（operationResult=FAIL）。 */
+    private static void expectCommitFailure(Action action, String label) {
+        Throwable failure = capture(action);
+        require(failure != null, label + "：未抛异常 expected=FAIL actual=无异常");
+        require(failure.getMessage() != null && failure.getMessage().contains("cannot commit state"),
+                label + "：异常=" + failure + " expected=cannot commit state");
+    }
+
+    private static boolean hasStagingFile(Path dir) throws IOException {
+        try (var stream = Files.list(dir)) {
+            return stream.anyMatch(path -> path.getFileName().toString().endsWith(".staging"));
+        }
+    }
+
+    /**
+     * 可注入文件操作（§11.4）：下一次 write 或 atomicMove 抛 IOException。
+     * 生产语义（写全量 + force、ATOMIC_MOVE + REPLACE_EXISTING）在测试内重新实现，
+     * 真实文件权限不参与故障注入。
+     */
+    private static final class FailingStateFileOps implements StateFileOps {
+
+        private boolean failNextWrite;
+        private boolean failNextAtomicMove;
+
+        void failNextWrite() {
+            this.failNextWrite = true;
+        }
+
+        void failNextAtomicMove() {
+            this.failNextAtomicMove = true;
+        }
+
+        @Override
+        public void writeAndSync(Path staging, byte[] bytes) throws IOException {
+            if (failNextWrite) {
+                failNextWrite = false;
+                throw new IOException("INJECTED_WRITE_FAILURE");
+            }
+            try (FileChannel channel = FileChannel.open(staging,
+                    StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING)) {
+                ByteBuffer buffer = ByteBuffer.wrap(bytes);
+                while (buffer.hasRemaining()) {
+                    channel.write(buffer);
+                }
+                channel.force(true);
+            }
+        }
+
+        @Override
+        public void atomicMove(Path staging, Path target) throws IOException {
+            if (failNextAtomicMove) {
+                failNextAtomicMove = false;
+                throw new IOException("INJECTED_ATOMIC_MOVE_FAILURE");
+            }
+            Files.move(staging, target,
+                    StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+        }
     }
 
     /** 包装 Storage，按需让下一次 commitState 失败。 */

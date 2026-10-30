@@ -4,6 +4,7 @@ import lab.simulation.resource.Destination;
 import lab.simulation.resource.Reservation;
 import lab.simulation.resource.ReservationState;
 import lab.simulation.resource.ResourceAvailability;
+import lab.simulation.resource.ResourceStateValidator;
 import lab.simulation.resource.ResourceWorldSnapshot;
 import lab.simulation.resource.ServicePoint;
 import lab.simulation.resource.VirtualResource;
@@ -196,16 +197,18 @@ public class SqliteStorage implements Storage, AutoCloseable {
 
     // ---------- Storage ----------
 
-    /** 读取整份状态（五张业务表 + 四张资源表）。 */
+    /** 读取整份状态（五张业务表 + 四张资源表），返回前执行统一校验器。 */
     @Override
     public synchronized RegistryState loadState() {
-        return new RegistryState(
+        RegistryState state = new RegistryState(
                 readPoints(),
                 readApplications(),
                 readOutbox(),
                 readInbox(),
                 readWorkflows(),
                 readResourceWorld());
+        ResourceStateValidator.validate(state);
+        return state;
     }
 
     /**
@@ -215,6 +218,7 @@ public class SqliteStorage implements Storage, AutoCloseable {
     @Override
     public synchronized void commitState(RegistryState next) {
         checkWritable(); // 第 4 层：写任何 SQL 之前就拒绝
+        ResourceStateValidator.validate(next); // 统一校验器：写任何 SQL 之前 fail-closed
         try {
             conn.setAutoCommit(false);
             try (Statement statement = conn.createStatement()) {

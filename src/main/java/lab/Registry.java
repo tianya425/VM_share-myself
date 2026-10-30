@@ -5,6 +5,7 @@ import lab.simulation.resource.Reservation;
 import lab.simulation.resource.ReservationDecision;
 import lab.simulation.resource.ReservationState;
 import lab.simulation.resource.ResourceAvailability;
+import lab.simulation.resource.ResourceStateValidator;
 import lab.simulation.resource.ResourceWorldSnapshot;
 import lab.simulation.resource.ServicePoint;
 import lab.simulation.resource.VirtualResource;
@@ -52,6 +53,8 @@ public class Registry {
         this.rcsPort = rcsPort;
         this.readOnly = readOnly;
         RegistryState loaded = storage.loadState();
+        // 构造 / restart 恢复：统一校验器必须在这里 fail-closed（§10.4）。
+        ResourceStateValidator.validate(loaded);
         for (Point p : loaded.points()) {
             points.put(p.pointId(), p);
         }
