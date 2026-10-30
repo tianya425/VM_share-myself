@@ -10,14 +10,14 @@
 #   07 RegistryChecks=279  08 ConcurrencyChecks=8    09 ReliabilityR1=14
 #   10 30 个旧 case diff   11 Parser=16              12 Runtime=18
 #   13 ResourceWorld=24    14 ResourceStorage=6      15 ResourceParser=7
-#   16 ResourceScenario=10 17 ReplayEvidence=12      18 validate 合法场景×3
-#   19 validate 非法场景×2 20 run 非法场景×1          21 run SIM-001
-#   22 run SIM-002         23 run SIM-003            24 二次 run SIM-002
-#   25 compare → MATCH     26 validate 资源场景×6    27 资源场景双跑×6 → 6 对 MATCH
-#   28 资源非法场景×5（退出 1 + 稳定 code + 首错停）  29 22 个 manifest 校验
-#   30 证据包 7 文件形状   31 21 字段顺序            32 Evidence 安全扫描
-#   33 README/docs 安全扫描                          34 工作区+确定性
-#   35 唯一终点
+#   16 ResourceScenario=10 17 ResourceContract=42    18 ReplayEvidence=12
+#   19 validate 合法场景×3 20 validate 非法场景×2     21 run 非法场景×1
+#   22 run SIM-001         23 run SIM-002             24 run SIM-003
+#   25 二次 run SIM-002    26 compare → MATCH         27 validate 资源场景×6
+#   28 资源场景双跑×6 → 6 对 MATCH                    29 资源非法场景×5（退出 1 + 稳定 code + 首错停）
+#   30 22 个 manifest 校验 31 证据包 7 文件形状       32 21 字段顺序
+#   33 Evidence 安全扫描   34 README/docs 安全扫描    35 工作区+确定性
+#   36 唯一终点
 #
 # 唯一终点：
 #   SIMULATION_RESOURCE_VERIFICATION_PASS originalCases=30 baseValidScenarios=3 baseInvalidScenarios=3 resourceValidScenarios=6 resourceInvalidScenarios=5 resourceReplay=6 realExternalWrites=0
@@ -26,7 +26,7 @@ set -eu
 set -o pipefail
 
 STEP_NO=0
-STEP_TOTAL=35
+STEP_TOTAL=36
 
 step() {
     STEP_NO=$((STEP_NO + 1))
@@ -250,6 +250,17 @@ fi
 grep -qxF 'RESOURCE_SCENARIO_CASES_PASSED=10' build/test-temp/resource-scenario.out.txt \
     || die "RESOURCE_SCENARIO_CHECKS_LINE"
 grep -xF 'RESOURCE_SCENARIO_CASES_PASSED=10' build/test-temp/resource-scenario.out.txt
+
+step "ResourceContractCorrectionChecks → 资源合同锁（C1 先红，整改前红灯）"
+if java -cp "$TCP" lab.simulation.resource.ResourceContractCorrectionChecks \
+        > build/test-temp/resource-contract.out.txt 2>&1; then
+    grep -qxF 'RESOURCE_R1_CONTRACT_CASES_PASSED=42' build/test-temp/resource-contract.out.txt \
+        || die "RESOURCE_R1_CONTRACT_CHECKS_LINE"
+    grep -xF 'RESOURCE_R1_CONTRACT_CASES_PASSED=42' build/test-temp/resource-contract.out.txt
+else
+    cat build/test-temp/resource-contract.out.txt >&2
+    die "RESOURCE_R1_CONTRACT_RED_LIGHT 资源合同断言失败（整改前预期红灯）"
+fi
 
 step "ReplayEvidenceChecks → REPLAY_EVIDENCE_R1_CASES_PASSED=12"
 if ! java -cp "$TCP" lab.simulation.ReplayEvidenceChecks > build/test-temp/replay.out.txt 2>&1; then
