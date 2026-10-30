@@ -132,9 +132,9 @@ public class EvidenceBundleWriter {
         sb.append("runStatus=").append(result.runStatus()).append("\n");
         sb.append("plannedEventCount=").append(result.plannedCount()).append("\n");
         sb.append("executedEventCount=").append(result.executedCount()).append("\n");
-        sb.append("passCount=").append(result.passCount()).append("\n");
-        sb.append("failCount=").append(result.failCount()).append("\n");
-        sb.append("skippedCount=").append(result.skippedCount()).append("\n");
+        sb.append("eventPassCount=").append(result.passCount()).append("\n");
+        sb.append("eventFailCount=").append(result.failCount()).append("\n");
+        sb.append("eventSkippedCount=").append(result.skippedCount()).append("\n");
         sb.append("firstFailureEventId=").append(orDash(result.firstFailureEventId())).append("\n");
         sb.append("firstFailureCode=").append(orDash(result.firstFailureCode())).append("\n");
         sb.append("oraclePassCount=").append(countOracle("PASS")).append("\n");

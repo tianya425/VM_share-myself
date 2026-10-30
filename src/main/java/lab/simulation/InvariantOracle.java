@@ -5,6 +5,7 @@ import lab.OutboxEntry;
 import lab.OutboxStatus;
 import lab.TransferApplication;
 import lab.simulation.resource.Reservation;
+import lab.simulation.resource.ReservationDecision;
 import lab.simulation.resource.ReservationState;
 import lab.simulation.resource.ResourceWorldSnapshot;
 import lab.simulation.resource.VirtualResource;
@@ -214,6 +215,12 @@ public class InvariantOracle {
                 case VALID_EXTERNAL_ORDERS -> list.add(checkValidExternalOrders(rule, ctx));
                 case NO_DUPLICATE_EXTERNAL_ORDER -> list.add(checkNoDuplicateRule(rule, ctx));
                 case RESERVATION_STATE -> list.add(checkReservationState(rule, ctx));
+                case RESERVATION_DECISION -> list.add(checkReservationDecision(rule, ctx));
+                case RESOURCE_HOLDER -> list.add(checkResourceHolder(rule, ctx));
+                case WAIT_QUEUE -> list.add(checkWaitQueue(rule, ctx));
+                case NO_DOUBLE_HOLD -> list.add(checkNoDoubleHold(rule, ctx));
+                case NO_ORPHAN_RESERVATION -> list.add(checkNoOrphanReservation(rule, ctx));
+                // ORC-RES-EXT 扩展检查（不属于固定 8 项）
                 case HELD_COUNT -> list.add(checkReservationCount(rule, ctx, ReservationState.HELD));
                 case WAITING_COUNT -> list.add(checkReservationCount(rule, ctx, ReservationState.WAITING));
                 case RESOURCE_AVAILABILITY -> list.add(checkResourceAvailability(rule, ctx));
@@ -313,12 +320,19 @@ public class InvariantOracle {
     }
 
     // ---------- 场景 EXPECT（Part B 资源） ----------
+    // 固定 8 项（§12.2）：RESERVATION_STATE / RESERVATION_DECISION / RESOURCE_AVAILABILITY /
+    // RESOURCE_HOLDER / WAIT_QUEUE / HELD_COUNT / NO_DOUBLE_HOLD / NO_ORPHAN_RESERVATION。
+    // 其后是 ORC-RES-EXT 扩展 EXPECT（WAITING_COUNT / QUEUE_ORDER / QUEUE_EMPTY /
+    // WORLD_RESTART_CONSISTENT / SINGLE_CAPACITY），保留但不得替代固定 8 项。
 
     private OracleResult checkReservationState(OracleRule rule, OracleContext ctx) {
         String applicationId = rule.arguments().get(0);
         String want = rule.arguments().get(1);
         List<Reservation> matches = reservationsOf(ctx.resourceWorld(), applicationId);
         if (matches.isEmpty()) {
+            if ("MISSING".equals(want)) {
+                return OracleResult.pass(rule.oracleId(), "RESERVATION_STATE", want, "MISSING");
+            }
             return OracleResult.fail(rule.oracleId(), "RESERVATION_STATE", want, "MISSING",
                     "no reservation for app=" + applicationId);
         }
@@ -329,7 +343,156 @@ public class InvariantOracle {
         String actual = matches.get(0).state().name();
         return want.equals(actual)
                 ? OracleResult.pass(rule.oracleId(), "RESERVATION_STATE", want, actual)
-                : OracleResult.fail(rule.oracleId(), "RESERVATION_STATE", want, actual, "");
+                : OracleResult.fail(rule.oracleId(), "RESERVATION_STATE", want, actual,
+                        "applicationId=" + applicationId);
+    }
+
+    /**
+     * RESERVATION_DECISION：按 eventId 查这次 RESERVATION_REQUEST 的真实决策类型。
+     * 事件未执行 / 无决策记录 → actual=MISSING。
+     */
+    private OracleResult checkReservationDecision(OracleRule rule, OracleContext ctx) {
+        String eventId = rule.arguments().get(0);
+        String want = rule.arguments().get(1);
+        String actual = "MISSING";
+        for (ResourceStep step : ctx.resourceSteps()) {
+            if (!step.eventId().equals(eventId)) {
+                continue;
+            }
+            ReservationDecision decision = step.decision();
+            if (decision != null) {
+                actual = decision.type().name();
+                break;
+            }
+        }
+        return want.equals(actual)
+                ? OracleResult.pass(rule.oracleId(), "RESERVATION_DECISION", want, actual)
+                : OracleResult.fail(rule.oracleId(), "RESERVATION_DECISION", want, actual,
+                        "eventId=" + eventId + ";decision=" + actual);
+    }
+
+    /**
+     * RESOURCE_HOLDER：资源的 HELD 持有者；无持有者时 actual=NONE。
+     */
+    private OracleResult checkResourceHolder(OracleRule rule, OracleContext ctx) {
+        String resourceId = rule.arguments().get(0);
+        String want = rule.arguments().get(1);
+        List<String> holders = new ArrayList<>();
+        for (Reservation reservation : ctx.resourceWorld().reservations()) {
+            if (reservation.resourceId().equals(resourceId)
+                    && reservation.state() == ReservationState.HELD) {
+                holders.add(reservation.applicationId());
+            }
+        }
+        String actual = holders.isEmpty() ? "NONE" : String.join(",", holders);
+        return want.equals(actual)
+                ? OracleResult.pass(rule.oracleId(), "RESOURCE_HOLDER", want, actual)
+                : OracleResult.fail(rule.oracleId(), "RESOURCE_HOLDER", want, actual,
+                        "resourceId=" + resourceId + ";holders=" + actual);
+    }
+
+    /**
+     * WAIT_QUEUE：按固定排序键（requestedOffsetMillis → requestedLogicalSequence →
+     * applicationId）输出 WAITING 队列；空队列 actual=NONE。
+     */
+    private OracleResult checkWaitQueue(OracleRule rule, OracleContext ctx) {
+        String resourceId = rule.arguments().get(0);
+        String want = rule.arguments().get(1);
+        List<String> queue = new ArrayList<>();
+        for (Reservation reservation : ctx.resourceWorld().reservations()) {
+            if (reservation.resourceId().equals(resourceId)
+                    && reservation.state() == ReservationState.WAITING) {
+                queue.add(reservation.applicationId());
+            }
+        }
+        String actual = queue.isEmpty() ? "NONE" : String.join(",", queue);
+        return want.equals(actual)
+                ? OracleResult.pass(rule.oracleId(), "WAIT_QUEUE", want, actual)
+                : OracleResult.fail(rule.oracleId(), "WAIT_QUEUE", want, actual,
+                        "resourceId=" + resourceId + ";waitQueue=" + actual);
+    }
+
+    /**
+     * NO_DOUBLE_HOLD：同一 application 的非终态 Reservation 数量必须 ≤ 1。
+     */
+    private OracleResult checkNoDoubleHold(OracleRule rule, OracleContext ctx) {
+        String applicationId = rule.arguments().get(0);
+        String want = rule.arguments().get(1);
+        int active = 0;
+        List<String> reservationIds = new ArrayList<>();
+        for (Reservation reservation : ctx.resourceWorld().reservations()) {
+            if (reservation.applicationId().equals(applicationId)
+                    && !reservation.state().isTerminal()) {
+                active++;
+                reservationIds.add(reservation.reservationId());
+            }
+        }
+        String actual = active <= 1 ? "PASS" : "FAIL";
+        return want.equals(actual)
+                ? OracleResult.pass(rule.oracleId(), "NO_DOUBLE_HOLD", want, actual)
+                : OracleResult.fail(rule.oracleId(), "NO_DOUBLE_HOLD", want, actual,
+                        "applicationId=" + applicationId + ";activeCount=" + active
+                                + ";reservationIds=" + String.join(",", reservationIds));
+    }
+
+    /**
+     * NO_ORPHAN_RESERVATION：每条 Reservation 的 Application 与
+     * Destination/ServicePoint/Resource 引用链都有效。无参数，期望 PASS。
+     */
+    private OracleResult checkNoOrphanReservation(OracleRule rule, OracleContext ctx) {
+        Set<String> applications = new HashSet<>();
+        for (TransferApplication app : ctx.applications()) {
+            applications.add(app.applicationId());
+        }
+        ResourceWorldSnapshot world = ctx.resourceWorld();
+        int orphans = 0;
+        List<String> reservationIds = new ArrayList<>();
+        for (Reservation reservation : world.reservations()) {
+            if (!applications.contains(reservation.applicationId())
+                    || chainBroken(world, reservation)) {
+                orphans++;
+                reservationIds.add(reservation.reservationId());
+            }
+        }
+        String expected = "PASS";
+        String actual = orphans == 0 ? "PASS" : "FAIL";
+        if (actual.equals(expected)) {
+            return OracleResult.pass(rule.oracleId(), "NO_ORPHAN_RESERVATION", expected, actual);
+        }
+        return OracleResult.fail(rule.oracleId(), "NO_ORPHAN_RESERVATION", expected, actual,
+                "orphanReservations=" + orphans
+                        + ";reservationIds=" + String.join(",", reservationIds));
+    }
+
+    private static boolean chainBroken(ResourceWorldSnapshot world, Reservation reservation) {
+        boolean destinationFound = false;
+        for (var destination : world.destinations()) {
+            if (destination.destinationId().equals(reservation.destinationId())) {
+                destinationFound = true;
+                break;
+            }
+        }
+        if (!destinationFound) {
+            return true;
+        }
+        boolean servicePointFound = false;
+        boolean servicePointMatches = false;
+        for (var servicePoint : world.servicePoints()) {
+            if (servicePoint.servicePointId().equals(reservation.servicePointId())) {
+                servicePointFound = true;
+                servicePointMatches = servicePoint.destinationId().equals(reservation.destinationId());
+                break;
+            }
+        }
+        if (!servicePointFound || !servicePointMatches) {
+            return true;
+        }
+        for (var resource : world.resources()) {
+            if (resource.resourceId().equals(reservation.resourceId())) {
+                return !resource.servicePointId().equals(reservation.servicePointId());
+            }
+        }
+        return true;
     }
 
     private OracleResult checkReservationCount(OracleRule rule, OracleContext ctx, ReservationState state) {

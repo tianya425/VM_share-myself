@@ -73,9 +73,9 @@ public interface SimulationTarget {
     void destinationAdd(String destinationId, String name);
 
     /**
-     * 新增一个 ServicePoint（引用已存在的 Destination 与 Registry Point）。
+     * 新增一个 ServicePoint（引用已存在的 Destination 与 Registry Point；三字段合同）。
      */
-    void servicePointAdd(String servicePointId, String destinationId, String registryPointId, String name);
+    void servicePointAdd(String servicePointId, String destinationId, String pointId);
 
     /**
      * 新增一个 VirtualResource（容量 1，默认 ENABLED）。
@@ -88,11 +88,11 @@ public interface SimulationTarget {
     void resourceSetAvailability(String resourceId, String availability);
 
     /**
-     * 请求预约；offset 与 logicalSequence 来自场景事件。
+     * 请求预约；requestedOffset 与 requestedLogicalSequence 来自场景事件。
      */
     ReservationDecision reservationRequest(String applicationId, String destinationId,
                                            String servicePointId, String resourceId,
-                                           long offsetMillis, long logicalSequence);
+                                           long requestedOffsetMillis, long requestedLogicalSequence);
 
     /**
      * 释放 HELD 预约。

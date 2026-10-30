@@ -231,18 +231,20 @@
 
     bash scripts/verify-simulation.sh
 
-脚本固定 35 步，任一步失败立即非零退出，不吞结果。它依次完成：
+脚本固定 24 项，任一步失败立即非零退出，不吞结果。它依次完成：
 
 1. 仓库根自检、JDK 21 自检、只清理 `out` / `build/runs` / `build/case-runs` / `build/test-temp`；
 2. 用 `LC_ALL=C sort` 生成源文件清单，编译到 `out/main`、`out/test`，并核对 `major version: 65`；
 3. 六个 Part A 检查入口逐字核对：`CHECKS_PASSED=279`、`CONCURRENCY_CHECKS_PASSED=8`、`RELIABILITY_R1_CASES_PASSED=14`、`SCENARIO_PARSER_CASES_PASSED=16`、`SIMULATION_RUNTIME_CASES_PASSED=18`、`REPLAY_EVIDENCE_R1_CASES_PASSED=12`；
-4. 四个资源检查入口逐字核对：`RESOURCE_WORLD_CASES_PASSED=24`、`RESOURCE_STORAGE_CASES_PASSED=6`、`RESOURCE_PARSER_CASES_PASSED=7`、`RESOURCE_SCENARIO_CASES_PASSED=10`；
+4. 四个资源检查入口逐字核对：`RESOURCE_WORLD_CASES_PASSED=24`、`RESOURCE_STORAGE_CASES_PASSED=6`、`RESOURCE_PARSER_CASES_PASSED=7`、`RESOURCE_SCENARIO_CASES_PASSED=10`，以及 `RESOURCE_R1_CONTRACT_CASES_PASSED=42`；
 5. 30 个旧 case 各自在 `build/case-runs/<name>` 独立工作目录运行，产物写 `build/case-runs/<name>.actual.txt`，与 `cases/<name>.expected.txt` 逐字节 diff；
 6. 3 个合法场景 validate 退出 0；2 个 parse 非法场景退出 2 且输出稳定 code；`run scenarios/invalid/invalid-unscripted-call.scenario` 退出 1、`RUN_FAILED`、`ORC-SYS-001=FAIL`；
 7. 3 个合法场景各 run 一次，SIM-002 再 run 一次并 `compare` → `REPLAY_MATCH`；
-8. 6 个资源合法场景 validate 退出 0，各 run 两次并 `compare` → 6 对 `REPLAY_MATCH`；5 个资源非法场景退出 1、稳定 code 且首错后全部 `EVENT_SKIPPED`；
+8. 6 个资源合法场景 validate 退出 0，各 run 两次并 `compare` → 6 对 `REPLAY_MATCH`；5 个资源非法场景退出 1、固定 code 且首错后全部 `EVENT_SKIPPED`；
 9. 22 个证据目录逐一 `sha256sum -c manifest.sha256`，核对 7 文件形状、manifest 6 行、`run-summary.txt` 21 字段顺序，并核对 `ORC-RES-SYS-006` 的 `restartPairs=<n>,mismatches=<m>` 形态；
-10. 扫描 Evidence 与 README/docs 的绝对路径、用户名、凭据值、真实内网 IP、越级声明词，并检查工作区无 `.class` / `.db` / `-wal` / `-shm` / `-journal` 残留、源码无 `Thread.sleep` / `Instant.now` / `currentTimeMillis`。
+10. 核对六条固定系统 Oracle 的反向夹具、`docs/resource-mutation-results.md` 六项 mutation 记录完整性、`realExternalWrites=0`、M4/真实环境引用扫描、文档任务 ID/回执绑定/Gate 一致性；
+11. 扫描 Evidence 与 README/docs 的绝对路径、用户名、凭据值、真实内网 IP、越级声明词；
+12. 可选 `SIM_EVIDENCE_OUTPUT_DIR`：设置时把最终 Evidence 复制为 `<dir>/valid/SIM-101-A…SIM-106-B` 与 `<dir>/invalid/SIM-INVALID-101…105`，并输出 `FINAL_EVIDENCE_ROOT=SIM_EVIDENCE_OUTPUT_DIR`（日志不含本机绝对路径，脚本不删除该目录）。
 
 全部通过的终点行（逐字）：
 
@@ -276,7 +278,7 @@
 
 ### 资源动作（8 个）
 
-`DESTINATION_ADD`、`SERVICE_POINT_ADD`、`VIRTUAL_RESOURCE_ADD`、`RESOURCE_SET`、
+`DESTINATION_ADD`、`SERVICE_POINT_ADD`、`RESOURCE_ADD`、`RESOURCE_SET`、
 `RESERVATION_REQUEST`、`RESERVATION_RELEASE`、`RESERVATION_CANCEL`、`WORLD_RESTART`
 
 ### 场景
@@ -285,9 +287,9 @@
 
 3 个非法场景：`scenarios/invalid/invalid-backward-time.scenario`（`SCENARIO_EVENT_ORDER`）、`invalid-duplicate-event.scenario`（`SCENARIO_DUPLICATE_EVENT`）、`invalid-unscripted-call.scenario`（运行期 `UNSCRIPTED_EXTERNAL_CALL`）。
 
-6 个资源合法场景（`scenarios/resource/`）：`sim-101-single-hold-release`（单容量占用/释放）、`sim-102-queue-order`（队列稳定排序）、`sim-103-queue-promotion`（队首晋升）、`sim-104-idempotent-request`（幂等请求）、`sim-105-disable-enable`（禁用不驱逐/启用晋升）、`sim-106-restart-recovery`（两次重启后恢复并继续晋升）。
+6 个资源合法场景（`scenarios/resource/`）：`sim-101-single-hold-release`（单资源占用与释放）、`sim-102-contention-promotion`（同 offset 两申请争用与晋升）、`sim-103-idempotent-request`（重复请求幂等）、`sim-104-conflicting-target`（同一申请目标冲突）、`sim-105-disable-enable`（禁用、等待、启用）、`sim-106-restart-recovery`（两次重启恢复）。
 
-5 个资源非法场景（`scenarios/resource/invalid/`）：`SIM-INVALID-101` 缺 Destination（`RESOURCE_TARGET_MISMATCH`）、`SIM-INVALID-102` 缺 Point（`UNKNOWN_POINT`）、`SIM-INVALID-103` 冲突（`RESERVATION_CONFLICT`）、`SIM-INVALID-104` 终态重开（`RESERVATION_TERMINAL`）、`SIM-INVALID-105` 引用不匹配（`RESOURCE_TARGET_MISMATCH`）。
+5 个资源非法场景（`scenarios/resource/invalid/`）：`SIM-INVALID-101` 缺失 Destination（`RESOURCE_DESTINATION_NOT_FOUND`）、`SIM-INVALID-102` 目标链不匹配（`RESOURCE_TARGET_MISMATCH`）、`SIM-INVALID-103` 重复冲突 Resource ID（`RESOURCE_DUPLICATE_CONFLICT`）、`SIM-INVALID-104` 非 holder release（`RESERVATION_NOT_HELD`）、`SIM-INVALID-105` 终态重开（`RESERVATION_TERMINAL`）。
 
 ### 证据目录
 
@@ -310,6 +312,16 @@
 - ORC-RES-SYS-004 幂等稳定：`IDEMPOTENT` 请求不改变编号、状态与排序键
 - ORC-RES-SYS-005 禁用不驱逐：`RESOURCE_SET ... DISABLED` 前后 holder 集合不变
 - ORC-RES-SYS-006 重启一致：`restartPairs=<n>,mismatches=<m>`，逐对比较 `WORLD_RESTART` 前后规范摘要
+
+## STU-SIM-02-R1 整改结论（2026-10-30）
+
+- 分支：`nzy/stu-sim-02-r1-contract-closeout`；base=`ecc0215`；检查点 C1—C6 顺序提交。
+- 固定计数：`originalCases=30`、`RESOURCE_WORLD_CASES=24`、`RESOURCE_R1_CONTRACT_CASES=42`、`RESOURCE_SCENARIO_CASES=10`、`resourceValidScenarios=6`、`resourceInvalidScenarios=5`、`resourceReplay=6`、`RESOURCE_MUTATION_CASES=6`、`realExternalWrites=0`。
+- 终态：`SELF_CHECK=PASS`；`GATE_B=WAIT_FOR_INDEPENDENT_REVIEW`（不得写 PASS）。
+- 唯一验证命令：`bash scripts/verify-simulation.sh`；终点行见上文。
+
+FINAL_SOURCE_IDENTITY=BOUND_BY_EXTERNAL_DELIVERY_RECEIPT
+DELIVERY_RECEIPT=delivery-receipt.txt
 
 ## 禁止范围
 
@@ -337,3 +349,4 @@
 - `docs/delivery-verification.md` — 分阶段复验记录
 - `docs/mutation-results.md` — MUT-01..05 变异测试记录
 - `docs/resource-mutation-results.md` — RES-MUT-01..06 资源变异测试记录
+- `docs/resource-world.md` — 资源领域、状态机、队列、存储、重启与证据映射

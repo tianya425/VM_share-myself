@@ -144,9 +144,10 @@ public class SimulationRuntime {
             case WORKFLOW_START -> target.workflowStart(args.get(0));
             case WORKFLOW_ADVANCE -> target.workflowAdvance(args.get(0));
             case DESTINATION_ADD -> target.destinationAdd(args.get(0), args.get(1));
-            case SERVICE_POINT_ADD -> target.servicePointAdd(
-                    args.get(0), args.get(1), args.get(2), args.get(3));
-            case VIRTUAL_RESOURCE_ADD -> target.virtualResourceAdd(args.get(0), args.get(1));
+            // STU-SIM-02-R1 §12.1：SERVICE_POINT_ADD 固定三参数（无 name）；
+            // RESOURCE_ADD 是资源新增动作的规范名。
+            case SERVICE_POINT_ADD -> target.servicePointAdd(args.get(0), args.get(1), args.get(2));
+            case RESOURCE_ADD -> target.virtualResourceAdd(args.get(0), args.get(1));
             case RESOURCE_SET -> target.resourceSetAvailability(args.get(0), args.get(1));
             case RESERVATION_REQUEST -> {
                 ReservationDecision decision = target.reservationRequest(
@@ -177,7 +178,7 @@ public class SimulationRuntime {
 
     private static boolean isResourceAction(ScenarioEvent.Action action) {
         return switch (action) {
-            case DESTINATION_ADD, SERVICE_POINT_ADD, VIRTUAL_RESOURCE_ADD, RESOURCE_SET,
+            case DESTINATION_ADD, SERVICE_POINT_ADD, RESOURCE_ADD, RESOURCE_SET,
                  RESERVATION_REQUEST, RESERVATION_RELEASE, RESERVATION_CANCEL, WORLD_RESTART -> true;
             default -> false;
         };
@@ -185,7 +186,7 @@ public class SimulationRuntime {
 
     private static String resourceIdOf(ScenarioEvent event) {
         return switch (event.action()) {
-            case VIRTUAL_RESOURCE_ADD, RESOURCE_SET -> event.arguments().get(0);
+            case RESOURCE_ADD, RESOURCE_SET -> event.arguments().get(0);
             case RESERVATION_REQUEST -> event.arguments().get(3);
             default -> "";
         };

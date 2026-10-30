@@ -4,6 +4,7 @@ import lab.simulation.resource.Destination;
 import lab.simulation.resource.Reservation;
 import lab.simulation.resource.ReservationState;
 import lab.simulation.resource.ResourceAvailability;
+import lab.simulation.resource.ResourceStateValidator;
 import lab.simulation.resource.ResourceWorldSnapshot;
 import lab.simulation.resource.ServicePoint;
 import lab.simulation.resource.VirtualResource;
@@ -103,8 +104,7 @@ public class SqliteStorage implements Storage, AutoCloseable {
                     CREATE TABLE IF NOT EXISTS service_points (
                         service_point_id TEXT PRIMARY KEY,
                         destination_id TEXT NOT NULL,
-                        registry_point_id TEXT NOT NULL,
-                        name TEXT NOT NULL
+                        point_id TEXT NOT NULL
                     )
                     """,
                     """
@@ -197,16 +197,18 @@ public class SqliteStorage implements Storage, AutoCloseable {
 
     // ---------- Storage ----------
 
-    /** 读取整份状态（五张业务表 + 四张资源表）。 */
+    /** 读取整份状态（五张业务表 + 四张资源表），返回前执行统一校验器。 */
     @Override
     public synchronized RegistryState loadState() {
-        return new RegistryState(
+        RegistryState state = new RegistryState(
                 readPoints(),
                 readApplications(),
                 readOutbox(),
                 readInbox(),
                 readWorkflows(),
                 readResourceWorld());
+        ResourceStateValidator.validate(state);
+        return state;
     }
 
     /**
@@ -216,6 +218,7 @@ public class SqliteStorage implements Storage, AutoCloseable {
     @Override
     public synchronized void commitState(RegistryState next) {
         checkWritable(); // 第 4 层：写任何 SQL 之前就拒绝
+        ResourceStateValidator.validate(next); // 统一校验器：写任何 SQL 之前 fail-closed
         try {
             conn.setAutoCommit(false);
             try (Statement statement = conn.createStatement()) {
@@ -475,13 +478,12 @@ public class SqliteStorage implements Storage, AutoCloseable {
         }
         try (Statement statement = conn.createStatement();
              ResultSet rs = statement.executeQuery(
-                     "SELECT service_point_id, destination_id, registry_point_id, name FROM service_points")) {
+                     "SELECT service_point_id, destination_id, point_id FROM service_points")) {
             while (rs.next()) {
                 servicePoints.add(new ServicePoint(
                         rs.getString("service_point_id"),
                         rs.getString("destination_id"),
-                        rs.getString("registry_point_id"),
-                        rs.getString("name")));
+                        rs.getString("point_id")));
             }
         } catch (SQLException e) {
             throw new RuntimeException("cannot load service_points", e);
@@ -630,12 +632,11 @@ public class SqliteStorage implements Storage, AutoCloseable {
             statement.executeBatch();
         }
         try (PreparedStatement statement = conn.prepareStatement(
-                "INSERT INTO service_points (service_point_id, destination_id, registry_point_id, name) VALUES (?, ?, ?, ?)")) {
+                "INSERT INTO service_points (service_point_id, destination_id, point_id) VALUES (?, ?, ?)")) {
             for (ServicePoint servicePoint : world.servicePoints()) {
                 statement.setString(1, servicePoint.servicePointId());
                 statement.setString(2, servicePoint.destinationId());
-                statement.setString(3, servicePoint.registryPointId());
-                statement.setString(4, servicePoint.name());
+                statement.setString(3, servicePoint.pointId());
                 statement.addBatch();
             }
             statement.executeBatch();
@@ -659,8 +660,8 @@ public class SqliteStorage implements Storage, AutoCloseable {
                 statement.setString(4, reservation.servicePointId());
                 statement.setString(5, reservation.resourceId());
                 statement.setString(6, reservation.state().name());
-                statement.setLong(7, reservation.offsetMillis());
-                statement.setLong(8, reservation.logicalSequence());
+                statement.setLong(7, reservation.requestedOffsetMillis());
+                statement.setLong(8, reservation.requestedLogicalSequence());
                 statement.addBatch();
             }
             statement.executeBatch();

@@ -239,7 +239,7 @@ REP-08 appState=UNKNOWN workflowState=RUNNING stepIndex=1 step0=COMPLETED verdic
 | Workflow 一致性 | FAIL（REP-08） |
 | GATE-A | **NOT_READY** |
 
-下一步：按任务书 Part A 的 PR1（可靠性）→ PR2（运行时与证据）→ PR3（脚本、变异、文档）顺序整改；Part B 在 `GATE-A=PASS` 前不得开始。
+下一步：按任务书 Part A 的 PR1（可靠性）→ PR2（运行时与证据）→ PR3（脚本、变异、文档）顺序整改；Part B 在 GATE-A 通过前不得开始。
 
 ---
 
@@ -815,7 +815,7 @@ SIMULATION_R1_VERIFICATION_PASS originalCases=30 validScenarios=3 invalidScenari
 
 | 项 | 值 |
 |---|---|
-| 基线 `main` | `439209e`（PR3 合并提交，GATE-A=PASS 绑定量） |
+| 基线 `main` | `439209e`（PR3 合并提交，GATE-A 绑定量） |
 | 分支 | `sim-02-resource-domain`，从 `439209e` 创建 |
 | 任务清单 | `S5-PartB-PR4-资源领域.md`（T1—T4） |
 | JDK | 21.0.12.1（`--release 21 -encoding UTF-8`，`major version: 65`） |

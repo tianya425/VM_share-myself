@@ -79,11 +79,11 @@ public class RegistrySimulationTarget implements SimulationTarget {
         registry.addDestination(destinationId, name);
     }
 
-    /** 对应 {@link Registry#addServicePoint}。 */
+    /** 对应 {@link Registry#addServicePoint}（三字段合同，无 name）。 */
     @Override
     public void servicePointAdd(String servicePointId, String destinationId,
-                                String registryPointId, String name) {
-        registry.addServicePoint(servicePointId, destinationId, registryPointId, name);
+                                String pointId) {
+        registry.addServicePoint(servicePointId, destinationId, pointId);
     }
 
     /** 对应 {@link Registry#addVirtualResource}。 */
@@ -103,9 +103,9 @@ public class RegistrySimulationTarget implements SimulationTarget {
     @Override
     public ReservationDecision reservationRequest(String applicationId, String destinationId,
                                                   String servicePointId, String resourceId,
-                                                  long offsetMillis, long logicalSequence) {
+                                                  long requestedOffsetMillis, long requestedLogicalSequence) {
         return registry.requestReservation(applicationId, destinationId, servicePointId,
-                resourceId, offsetMillis, logicalSequence);
+                resourceId, requestedOffsetMillis, requestedLogicalSequence);
     }
 
     /** 对应 {@link Registry#releaseReservation}。 */

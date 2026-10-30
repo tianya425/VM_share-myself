@@ -67,8 +67,8 @@ public final class ResourceParserChecks {
                 START_AT 2026-01-01T00:00:00Z
                 SEED 1
                 AT 0 10 EVT-001 DESTINATION_ADD D01 一号目的地
-                AT 0 11 EVT-002 SERVICE_POINT_ADD SP01 D01 P01 一号服务点
-                AT 0 12 EVT-003 VIRTUAL_RESOURCE_ADD R01 SP01
+                AT 0 11 EVT-002 SERVICE_POINT_ADD SP01 D01 P01
+                AT 0 12 EVT-003 RESOURCE_ADD R01 SP01
                 AT 0 13 EVT-004 RESOURCE_SET R01 DISABLED
                 AT 0 14 EVT-005 RESERVATION_REQUEST APP-001 D01 SP01 R01
                 AT 0 15 EVT-006 RESERVATION_RELEASE APP-001
@@ -80,7 +80,7 @@ public final class ResourceParserChecks {
         List<ScenarioEvent.Action> expected = List.of(
                 ScenarioEvent.Action.DESTINATION_ADD,
                 ScenarioEvent.Action.SERVICE_POINT_ADD,
-                ScenarioEvent.Action.VIRTUAL_RESOURCE_ADD,
+                ScenarioEvent.Action.RESOURCE_ADD,
                 ScenarioEvent.Action.RESOURCE_SET,
                 ScenarioEvent.Action.RESERVATION_REQUEST,
                 ScenarioEvent.Action.RESERVATION_RELEASE,
@@ -91,7 +91,7 @@ public final class ResourceParserChecks {
                     "第 " + (i + 1) + " 个 action=" + pkg.events().get(i).action()
                             + " 期望=" + expected.get(i));
         }
-        require(pkg.events().get(1).arguments().equals(List.of("SP01", "D01", "P01", "一号服务点")),
+        require(pkg.events().get(1).arguments().equals(List.of("SP01", "D01", "P01")),
                 "SERVICE_POINT_ADD 参数=" + pkg.events().get(1).arguments());
         require(pkg.events().get(4).arguments().equals(List.of("APP-001", "D01", "SP01", "R01")),
                 "RESERVATION_REQUEST 参数=" + pkg.events().get(4).arguments());
@@ -106,34 +106,34 @@ public final class ResourceParserChecks {
                 SEED 2
                 AT 0 10 EVT-001 WORLD_RESTART
                 EXPECT ORC-001 RESERVATION_STATE APP-001 HELD
-                EXPECT ORC-002 HELD_COUNT R01 1
-                EXPECT ORC-003 WAITING_COUNT R01 0
-                EXPECT ORC-004 RESOURCE_AVAILABILITY R01 DISABLED
-                EXPECT ORC-005 QUEUE_ORDER R01 APP-001 APP-002
-                EXPECT ORC-006 QUEUE_EMPTY R01
-                EXPECT ORC-007 WORLD_RESTART_CONSISTENT
-                EXPECT ORC-008 SINGLE_CAPACITY R01
+                EXPECT ORC-002 RESERVATION_DECISION EVT-001 HELD
+                EXPECT ORC-003 RESOURCE_AVAILABILITY R01 DISABLED
+                EXPECT ORC-004 RESOURCE_HOLDER R01 APP-001
+                EXPECT ORC-005 WAIT_QUEUE R01 APP-001,APP-002
+                EXPECT ORC-006 HELD_COUNT R01 1
+                EXPECT ORC-007 NO_DOUBLE_HOLD APP-001 PASS
+                EXPECT ORC-008 NO_ORPHAN_RESERVATION
                 END
                 """));
         require(pkg.oracles().size() == 8, "oracles=" + pkg.oracles().size() + " 期望=8");
         List<OracleRule.RuleType> expected = List.of(
                 OracleRule.RuleType.RESERVATION_STATE,
-                OracleRule.RuleType.HELD_COUNT,
-                OracleRule.RuleType.WAITING_COUNT,
+                OracleRule.RuleType.RESERVATION_DECISION,
                 OracleRule.RuleType.RESOURCE_AVAILABILITY,
-                OracleRule.RuleType.QUEUE_ORDER,
-                OracleRule.RuleType.QUEUE_EMPTY,
-                OracleRule.RuleType.WORLD_RESTART_CONSISTENT,
-                OracleRule.RuleType.SINGLE_CAPACITY);
+                OracleRule.RuleType.RESOURCE_HOLDER,
+                OracleRule.RuleType.WAIT_QUEUE,
+                OracleRule.RuleType.HELD_COUNT,
+                OracleRule.RuleType.NO_DOUBLE_HOLD,
+                OracleRule.RuleType.NO_ORPHAN_RESERVATION);
         for (int i = 0; i < expected.size(); i++) {
             require(pkg.oracles().get(i).ruleType() == expected.get(i),
                     "第 " + (i + 1) + " 个 ruleType=" + pkg.oracles().get(i).ruleType()
                             + " 期望=" + expected.get(i));
         }
-        require(pkg.oracles().get(4).arguments().equals(List.of("R01", "APP-001", "APP-002")),
-                "QUEUE_ORDER 参数=" + pkg.oracles().get(4).arguments());
-        require(pkg.oracles().get(6).arguments().isEmpty(),
-                "WORLD_RESTART_CONSISTENT 参数应为空：" + pkg.oracles().get(6).arguments());
+        require(pkg.oracles().get(4).arguments().equals(List.of("R01", "APP-001,APP-002")),
+                "WAIT_QUEUE 参数=" + pkg.oracles().get(4).arguments());
+        require(pkg.oracles().get(7).arguments().isEmpty(),
+                "NO_ORPHAN_RESERVATION 参数应为空：" + pkg.oracles().get(7).arguments());
     }
 
     // ================= RPT-03 =================

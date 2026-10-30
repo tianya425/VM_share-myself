@@ -5,6 +5,7 @@ import lab.simulation.resource.Reservation;
 import lab.simulation.resource.ReservationDecision;
 import lab.simulation.resource.ReservationState;
 import lab.simulation.resource.ResourceAvailability;
+import lab.simulation.resource.ResourceStateValidator;
 import lab.simulation.resource.ResourceWorldSnapshot;
 import lab.simulation.resource.ServicePoint;
 import lab.simulation.resource.VirtualResource;
@@ -52,6 +53,8 @@ public class Registry {
         this.rcsPort = rcsPort;
         this.readOnly = readOnly;
         RegistryState loaded = storage.loadState();
+        // 构造 / restart 恢复：统一校验器必须在这里 fail-closed（§10.4）。
+        ResourceStateValidator.validate(loaded);
         for (Point p : loaded.points()) {
             points.put(p.pointId(), p);
         }
@@ -683,11 +686,12 @@ public class Registry {
 
     /**
      * 新增 Destination：同 ID 同 name 幂等；同 ID 不同 name → {@code RESOURCE_DUPLICATE_CONFLICT}。
+     *
+     * <p>标量校验（ID 规则、name trim 后 1—40 并保存规范化值）由
+     * {@link Destination} 构造器完成，本方法不重复校验（STU-SIM-02-R1 §8.1/§8.2）。
      */
     public synchronized Destination addDestination(String destinationId, String name) {
         checkWritable();
-        checkId(destinationId);
-        checkName(name);
 
         VirtualResourceWorld current = world();
         Destination existing = current.findDestination(destinationId);
@@ -699,23 +703,22 @@ public class Registry {
     }
 
     /**
-     * 新增 ServicePoint：Destination 与 Registry Point 都必须已存在。
+     * 新增 ServicePoint（三字段合同）：Destination 与 Registry Point 都必须已存在。
      */
     public synchronized ServicePoint addServicePoint(String servicePointId, String destinationId,
-                                                     String registryPointId, String name) {
+                                                     String pointId) {
         checkWritable();
         checkId(servicePointId);
         checkId(destinationId);
-        checkId(registryPointId);
-        checkName(name);
-        if (!points.containsKey(registryPointId)) {
-            throw new RegistryException("UNKNOWN_POINT", registryPointId);
+        checkId(pointId);
+        if (!points.containsKey(pointId)) {
+            throw new RegistryException("UNKNOWN_POINT", pointId);
         }
 
         VirtualResourceWorld current = world();
         ServicePoint existing = current.findServicePoint(servicePointId);
         VirtualResourceWorld next = current.addServicePoint(
-                new ServicePoint(servicePointId, destinationId, registryPointId, name));
+                new ServicePoint(servicePointId, destinationId, pointId));
         if (existing == null) {
             commitWorld(next);
         }
@@ -759,47 +762,116 @@ public class Registry {
     }
 
     /**
-     * 请求预约。
+     * 请求预约（STU-SIM-02-R1 §9.1 固定算法，顺序逐条一致）：
+     * 校验参数 → application 存在 → 既有 Reservation 判断（终态/幂等/冲突）
+     * → 无既有才检查 CREATED → Destination/ServicePoint/Resource 依次存在性
+     * → 引用链 → availability 与 holder 决定 HELD/WAITING → 候选快照单次 commitState
+     * → 提交成功后发布内存并返回 HELD/WAITING decision。
      *
-     * <p>校验顺序：申请存在 → 申请为 CREATED → 资源/服务点/目的地引用链一致 →
-     * 终态不可重开 → 同目标幂等 / 不同目标冲突 → 容量与可用性决定 HELD 或 WAITING。
+     * <p>「相同目标」= applicationId + destinationId + servicePointId + resourceId 四元组
+     * （§9.2）；排序键不参与判断，重复请求保留第一次排序键。
+     * 同一申请不同目标是正常 {@link ReservationDecision.DecisionType#CONFLICT} 决策，
+     * 不抛异常（§9.3）。
      */
     public synchronized ReservationDecision requestReservation(String applicationId,
                                                                String destinationId,
                                                                String servicePointId,
                                                                String resourceId,
-                                                               long offsetMillis,
-                                                               long logicalSequence) {
+                                                               long requestedOffsetMillis,
+                                                               long requestedLogicalSequence) {
         checkWritable();
+        // 1. 校验 applicationId、destinationId、servicePointId、resourceId 和排序键。
         checkId(applicationId);
         checkId(destinationId);
         checkId(servicePointId);
         checkId(resourceId);
-        if (offsetMillis < 0 || logicalSequence < 1) {
+        if (requestedOffsetMillis < 0 || requestedLogicalSequence < 1) {
             throw new RegistryException("RESERVATION_INVALID_ORDER", applicationId);
         }
 
+        // 2. 查找 application；不存在则 RESERVATION_APPLICATION_NOT_FOUND。
         TransferApplication application = applications.get(applicationId);
         if (application == null) {
-            throw new RegistryException("UNKNOWN_APPLICATION", applicationId);
+            throw new RegistryException("RESERVATION_APPLICATION_NOT_FOUND", applicationId);
         }
+
+        // 3. 按 applicationId 查找既有 Reservation。
+        VirtualResourceWorld current = world();
+        Reservation existing = current.findReservation(applicationId);
+        if (existing != null) {
+            // 4. 终态重开 → RESERVATION_TERMINAL。
+            if (existing.isTerminal()) {
+                throw new RegistryException("RESERVATION_TERMINAL", applicationId);
+            }
+            boolean sameTarget = existing.applicationId().equals(applicationId)
+                    && existing.destinationId().equals(destinationId)
+                    && existing.servicePointId().equals(servicePointId)
+                    && existing.resourceId().equals(resourceId);
+            if (sameTarget) {
+                // 5. WAITING/HELD 且目标完全相同 → IDEMPOTENT（不提交新状态）。
+                return new ReservationDecision(ReservationDecision.DecisionType.IDEMPOTENT,
+                        existing, "reason=SAME_ACTIVE_RESERVATION");
+            }
+            // 6. WAITING/HELD 且目标不同 → CONFLICT（正常决策，不抛异常、不提交）。
+            return new ReservationDecision(ReservationDecision.DecisionType.CONFLICT,
+                    existing, "reason=DIFFERENT_ACTIVE_TARGET");
+        }
+
+        // 7. 只有不存在既有 Reservation 时，检查 application.state == CREATED。
         if (application.state() != ApplicationState.CREATED) {
             throw new RegistryException("RESERVATION_APPLICATION_STATE", applicationId);
         }
 
-        VirtualResourceWorld current = world();
-        Reservation existing = current.findReservation(applicationId);
-        VirtualResourceWorld next = current.request(applicationId, destinationId, servicePointId,
-                resourceId, offsetMillis, logicalSequence);
-        if (existing == null) {
-            commitWorld(next);
-            Reservation created = next.findReservation(applicationId);
-            ReservationDecision.Outcome outcome = created.state() == ReservationState.HELD
-                    ? ReservationDecision.Outcome.HELD
-                    : ReservationDecision.Outcome.WAITING;
-            return new ReservationDecision(outcome, created);
+        // 8. 依次检查 Destination、ServicePoint、Resource 是否存在（§9.3 固定错误码）。
+        Destination destination = current.findDestination(destinationId);
+        if (destination == null) {
+            throw new RegistryException("RESOURCE_DESTINATION_NOT_FOUND", destinationId);
         }
-        return new ReservationDecision(ReservationDecision.Outcome.IDEMPOTENT, existing);
+        ServicePoint servicePoint = current.findServicePoint(servicePointId);
+        if (servicePoint == null) {
+            throw new RegistryException("RESOURCE_SERVICE_POINT_NOT_FOUND", servicePointId);
+        }
+        VirtualResource resource = current.findResource(resourceId);
+        if (resource == null) {
+            throw new RegistryException("RESOURCE_NOT_FOUND", resourceId);
+        }
+
+        // 9. 检查 Destination→ServicePoint→Resource→Point 引用链。
+        if (!servicePoint.destinationId().equals(destinationId)
+                || !resource.servicePointId().equals(servicePointId)
+                || !points.containsKey(servicePoint.pointId())) {
+            throw new RegistryException("RESOURCE_TARGET_MISMATCH", applicationId);
+        }
+
+        // 10. 根据 availability 和 holder 决定 HELD 或 WAITING（容量固定 1）。
+        boolean canHold = resource.availability() == ResourceAvailability.ENABLED
+                && !current.hasHeld(resourceId);
+        ReservationState state = canHold ? ReservationState.HELD : ReservationState.WAITING;
+        Reservation created = new Reservation(
+                Reservation.idFor(applicationId),
+                applicationId,
+                destinationId,
+                servicePointId,
+                resourceId,
+                state,
+                requestedOffsetMillis,
+                requestedLogicalSequence);
+
+        // 11-13. 构造完整 next RegistryState → commitState(next) → 成功后发布内存并返回 decision。
+        VirtualResourceWorld next = current.addReservation(created);
+        commitWorld(next);
+        Reservation committed = next.findReservation(applicationId);
+        String detail = state == ReservationState.HELD
+                ? "reason=RESOURCE_AVAILABLE"
+                : resource.availability() == ResourceAvailability.DISABLED
+                        ? "reason=RESOURCE_DISABLED"
+                        : "reason=RESOURCE_BUSY";
+        return new ReservationDecision(
+                state == ReservationState.HELD
+                        ? ReservationDecision.DecisionType.HELD
+                        : ReservationDecision.DecisionType.WAITING,
+                committed,
+                detail);
     }
 
     /**
