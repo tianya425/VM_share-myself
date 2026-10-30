@@ -2,11 +2,11 @@
 
 | 文档属性 | 内容 |
 |---|---|
-| 版本 | V0.3 |
-| 日期 | 2026-10-24 |
+| 版本 | V0.4 |
+| 日期 | 2026-10-30 |
 | 类型 | 场景文件与 Evidence 格式说明 |
 | 对应正式文档 | IDS 仿真、回放与验证架构说明书 |
-| 状态 | FROZEN（PR5/PR6 资源运行时增补冻结） |
+| 状态 | FROZEN（STU-SIM-02-R1 C4：固定 8 Action / 8 EXPECT 与六条系统 Oracle 恢复） |
 | 绑定代码 | `lab.simulation.ScenarioParser` / `EvidenceBundleValidator` / `EvidenceBundleWriter` / `ReplayComparator` / `ResourceInvariantOracle` |
 
 ## 文档说明
@@ -98,12 +98,29 @@ ACCEPTED 和 TIMEOUT_BUT_CREATED 必须提供 externalOrderId；其余使用 `-`
 | WORKFLOW_ADVANCE | 1 | applicationId |
 | DESTINATION_ADD | 2 | destinationId, name |
 | SERVICE_POINT_ADD | 3 | servicePointId, destinationId, pointId |
-| VIRTUAL_RESOURCE_ADD | 2 | resourceId, servicePointId |
+| RESOURCE_ADD | 2 | resourceId, servicePointId |
 | RESOURCE_SET | 2 | resourceId, ENABLED/DISABLED |
 | RESERVATION_REQUEST | 4 | applicationId, destinationId, servicePointId, resourceId |
 | RESERVATION_RELEASE | 1 | applicationId |
 | RESERVATION_CANCEL | 1 | applicationId |
 | WORLD_RESTART | 0 | — |
+
+> STU-SIM-02-R1 §12.1：资源领域固定 8 个规范 Action，名称与参数逐字固定。
+> 资源新增动作的规范名是 `RESOURCE_ADD`；旧名 `VIRTUAL_RESOURCE_ADD` 已删除（历史旧规范），
+> Parser 不再接受该写法。
+
+### Parser 运行前检查（资源 DSL，§12.3）
+
+Parser 在运行前完成，不把校验留到 Oracle 运行时：
+
+- 参数数量：按上表固定；
+- ID 语法：参数位 ID 必须匹配 `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`；
+- enum allowlist：`RESOURCE_SET` 只接受 `ENABLED` / `DISABLED`；
+- `HELD_COUNT` / `WAITING_COUNT`：必须是非负整数且不超过 int 范围（负数 / 非整数 / 溢出拒绝）；
+- `WAIT_QUEUE`：队列参数是 `NONE` 或逗号分隔的 applicationId 列表，不允许空 token、不允许重复 applicationId；
+- `WORLD_RESTART` 与 `NO_ORPHAN_RESERVATION` 不接受参数；
+- 未知 Action / 未知 EXPECT 稳定失败（`SCENARIO_UNKNOWN_ACTION` / `SCENARIO_UNKNOWN_ORACLE`）；
+- 引用存在性不在 Parser 阶段检查（对象可能由前序事件创建），由事件执行期检查。
 
 > Part B 的 8 个 action 由运行时按事件分发。`WORLD_RESTART` 保留同一 Storage / Clock / Fake，
 > 丢弃 Registry 与 Target 后用 `loadState()` 重建，并记录重载前后的规范快照摘要；不触发外部调用。
@@ -118,16 +135,30 @@ ACCEPTED 和 TIMEOUT_BUT_CREATED 必须提供 externalOrderId；其余使用 `-`
 | QUERY_CALLS | 2 | applicationId, count |
 | VALID_EXTERNAL_ORDERS | 2 | applicationId, count |
 | NO_DUPLICATE_EXTERNAL_ORDER | 1 | applicationId |
-| RESERVATION_STATE | 2 | applicationId, HELD/WAITING/RELEASED/CANCELLED |
-| HELD_COUNT | 2 | resourceId, count |
+| RESERVATION_STATE | 2 | applicationId, WAITING/HELD/RELEASED/CANCELLED/MISSING |
+| RESERVATION_DECISION | 2 | eventId, HELD/WAITING/IDEMPOTENT/CONFLICT |
+| RESOURCE_AVAILABILITY | 2 | resourceId, ENABLED/DISABLED/MISSING |
+| RESOURCE_HOLDER | 2 | resourceId, applicationId/NONE |
+| WAIT_QUEUE | 2 | resourceId, commaSeparatedIds/NONE（按固定排序键输出） |
+| HELD_COUNT | 2 | resourceId, 0/1 |
+| NO_DOUBLE_HOLD | 2 | applicationId, PASS/FAIL |
+| NO_ORPHAN_RESERVATION | 0 | — |
+
+> STU-SIM-02-R1 §12.2：以上资源领域固定 8 个规范 EXPECT（`RESERVATION_STATE` /
+> `RESERVATION_DECISION` / `RESOURCE_AVAILABILITY` / `RESOURCE_HOLDER` / `WAIT_QUEUE` /
+> `HELD_COUNT` / `NO_DOUBLE_HOLD` / `NO_ORPHAN_RESERVATION`）在运行时始终启用。
+> `WAIT_QUEUE` 按 `requestedOffsetMillis → requestedLogicalSequence → applicationId` 固定排序键输出，
+> 空队列写 `NONE`。0 条或重复条目一律 FAIL（`MISSING` / `DUPLICATE_*`），不得静默 PASS。
+
+**ORC-RES-EXT 扩展 EXPECT（保留，不属于固定 8 项，不得替代固定合同）：**
+
+| ruleType | 参数数量 | 参数 |
+|---|---:|---|
 | WAITING_COUNT | 2 | resourceId, count |
-| RESOURCE_AVAILABILITY | 2 | resourceId, ENABLED/DISABLED |
 | QUEUE_ORDER | ≥2 | resourceId, applicationId...（按队列顺序） |
 | QUEUE_EMPTY | 1 | resourceId |
 | WORLD_RESTART_CONSISTENT | 0 | — |
 | SINGLE_CAPACITY | 1 | resourceId |
-
-> 资源 EXPECT 的检查器在运行时始终启用：`RESERVATION_STATE` / `HELD_COUNT` / `WAITING_COUNT` / `RESOURCE_AVAILABILITY` / `QUEUE_ORDER` / `QUEUE_EMPTY` / `WORLD_RESTART_CONSISTENT` / `SINGLE_CAPACITY`。0 条或重复条目一律 FAIL（`MISSING` / `DUPLICATE_*`），不得静默 PASS。
 
 ## Parser 稳定错误码
 
@@ -224,20 +255,32 @@ ACCEPTED 和 TIMEOUT_BUT_CREATED 必须提供 externalOrderId；其余使用 `-`
 
 六条系统不变量固定存在：`ORC-SYS-001` 外部调用全部有脚本、`ORC-SYS-002` 同一申请最多一个有效外单、`ORC-SYS-003` Unknown 先对账、`ORC-SYS-004` 终态不倒退、`ORC-SYS-005` Evidence 不越级、`ORC-SYS-006` 零真实外部写。
 
-六条资源不变量也固定存在（始终启用、真算，不可由场景关闭）：
+六条资源系统不变量也固定存在（STU-SIM-02-R1 §13.1 固定绑定，始终启用、真算，不可由场景关闭）：
 
 | oracleId | ruleType | 真实计算口径 |
 |---|---|---|
-| ORC-RES-SYS-001 | SINGLE_CAPACITY | 任一观察点上同一资源最多一个 HELD |
-| ORC-RES-SYS-002 | QUEUE_ORDER | WAITING 按 `requestedOffsetMillis → requestedLogicalSequence → applicationId` 升序；晋升只能取队首 |
-| ORC-RES-SYS-003 | TERMINAL_MONOTONIC | RELEASED / CANCELLED 之后不得再变回非终态 |
-| ORC-RES-SYS-004 | IDEMPOTENT_STABLE | IDEMPOTENT 请求前后，预约编号、状态与排序键逐字段不变 |
-| ORC-RES-SYS-005 | DISABLE_KEEPS_HOLDER | `RESOURCE_SET ... DISABLED` 前后该资源的 HELD 持有者集合不变 |
-| ORC-RES-SYS-006 | RESTART_REPLAY | 逐对比较 `WORLD_RESTART` 前后规范快照的 SHA-256 |
+| ORC-RES-SYS-001 | SINGLE_HELD_PER_RESOURCE | 每个 resource 的 HELD 数量 ≤ 1；检查运行中记录的每个已提交快照 |
+| ORC-RES-SYS-002 | ACTIVE_PER_APPLICATION | 每个 application 的非终态 Reservation 数量 ≤ 1；检查每个已提交快照 |
+| ORC-RES-SYS-003 | REFERENCE_CHAIN | 每条 Reservation 的 Destination/ServicePoint/Resource 引用链有效；检查每个已提交快照 |
+| ORC-RES-SYS-004 | WAIT_QUEUE_SORTED_UNIQUE | 每个 WAITING 队列按 `requestedOffsetMillis → requestedLogicalSequence → applicationId` 排序且无重复；检查每个已提交快照 |
+| ORC-RES-SYS-005 | TERMINAL_MONOTONIC | RELEASED / CANCELLED 之后不得再变为 WAITING / HELD；按状态历史检查 |
+| ORC-RES-SYS-006 | RESTART_REPLAY | 逐对比较 `WORLD_RESTART` 前后规范快照的 SHA-256；无重启时 `restartPairs=0,mismatches=0` 且 PASS |
+
+> 001—004 不得只看最终快照：必须以运行过程中记录的已提交快照（事件 after 快照 + 最终快照）逐点计算。
+> `actual` 必须包含真实计数或对象 ID（例如 `applicationId=APP-001;activeCount=2`），不能只写 `true`。
+> Oracle 只读，不调用 Registry 写入口，也不读取场景 EXPECT 决定 PASS/FAIL。
+
+**ORC-RES-EXT 扩展检查（保留，不属于固定六条）：**
+
+| oracleId | ruleType | 真实计算口径 |
+|---|---|---|
+| ORC-RES-EXT-001 | IDEMPOTENT_STABLE | IDEMPOTENT 请求前后，预约编号、状态与排序键逐字段不变 |
+| ORC-RES-EXT-002 | DISABLE_KEEPS_HOLDER | `RESOURCE_SET ... DISABLED` 前后该资源的 HELD 持有者集合不变 |
+| ORC-RES-EXT-003 | PROMOTE_HEAD_ONLY | 晋升只能取队列最小键，不能越过队首 |
 
 `ORC-RES-SYS-006` 的 `actual` 必须是 `restartPairs=<n>,mismatches=<m>`（例如 `restartPairs=2,mismatches=0`），`expected` 为 `restartPairs=<n>,mismatches=0`；禁止只写 `true` 或硬编码 PASS。
 
-场景 `EXPECT` 追加在十二条固定不变量之后；结果按 `oracleId` 升序排列。
+六条 ORC-SYS 与六条 ORC-RES-SYS、三条 ORC-RES-EXT 之后，才追加场景 `EXPECT`；结果按 `oracleId` 升序排列。
 
 ### manifest.sha256
 

@@ -407,21 +407,35 @@ public final class ResourceScenarioChecks {
                         ScenarioEvent.Action.RESERVATION_REQUEST, "R01", "", doubleHeld, doubleHeld, null)),
                 List.of(), "ORC-RES-SYS-001", "同一资源两个 HELD");
 
-        // 002：晋升越过队首（APP-020 先于更小键的 APP-030 被晋升）。
-        ResourceWorldSnapshot queued = snapshot(List.of(
-                reservation("APP-030", ReservationState.WAITING, 2000, 2),
-                reservation("APP-020", ReservationState.WAITING, 3000, 3)));
-        ResourceWorldSnapshot skipped = snapshot(List.of(
-                reservation("APP-030", ReservationState.WAITING, 2000, 2),
-                reservation("APP-020", ReservationState.HELD, 3000, 3)));
-        ResourceStep queuedStep = step("EVT-002", ScenarioEvent.Action.RESERVATION_REQUEST,
-                "R01", "", ResourceWorldSnapshot.empty(), queued, null);
-        ResourceStep skippedStep = step("EVT-003", ScenarioEvent.Action.RESERVATION_RELEASE,
-                "", "", queued, skipped, null);
-        expectFail(skipped, List.of(queuedStep, skippedStep), List.of(),
-                "ORC-RES-SYS-002", "晋升越过队首");
+        // 002：同一 application 两条非终态 Reservation。
+        ResourceWorldSnapshot doubleActive = snapshot(List.of(
+                reservation("RSV-APP-001", "APP-001", "D01", "SP01", "R01",
+                        ReservationState.HELD, 2000, 1),
+                reservation("RSV-APP-001", "APP-001", "D01", "SP01", "R01",
+                        ReservationState.WAITING, 3000, 2)));
+        expectFail(doubleActive, List.of(), List.of(),
+                "ORC-RES-SYS-002", "同一 application 两条非终态");
 
-        // 003：RELEASED 之后变回 HELD。
+        // 003：引用链悬空（reservation 指向不存在的 resource）。
+        ResourceWorldSnapshot dangling = new ResourceWorldSnapshot(
+                List.of(new Destination("D01", "一号目的地")),
+                List.of(new ServicePoint("SP01", "D01", "P01")),
+                List.of(new VirtualResource("R01", "SP01")),
+                List.of(reservation("RSV-APP-001", "APP-001", "D01", "SP01", "R99",
+                        ReservationState.HELD, 2000, 1)));
+        expectFail(dangling, List.of(), List.of(),
+                "ORC-RES-SYS-003", "引用链悬空");
+
+        // 004：WAITING 队列出现重复 applicationId。
+        ResourceWorldSnapshot duplicateQueue = snapshot(List.of(
+                reservation("RSV-APP-001", "APP-001", "D01", "SP01", "R01",
+                        ReservationState.WAITING, 2000, 1),
+                reservation("RSV-APP-001", "APP-001", "D01", "SP01", "R01",
+                        ReservationState.WAITING, 3000, 2)));
+        expectFail(duplicateQueue, List.of(), List.of(),
+                "ORC-RES-SYS-004", "WAITING 重复 applicationId");
+
+        // 005：RELEASED 之后变回 HELD。
         ResourceWorldSnapshot released = snapshot(List.of(
                 reservation("APP-001", ReservationState.RELEASED, 1000, 1)));
         ResourceWorldSnapshot reopened = snapshot(List.of(
@@ -432,9 +446,9 @@ public final class ResourceScenarioChecks {
         ResourceStep reopenedStep = step("EVT-005", ScenarioEvent.Action.RESERVATION_REQUEST,
                 "R01", "", released, reopened, null);
         expectFail(reopened, List.of(releasedStep, reopenedStep), List.of(),
-                "ORC-RES-SYS-003", "终态重开");
+                "ORC-RES-SYS-005", "终态重开");
 
-        // 004：IDEMPOTENT 决策前后排序键改变。
+        // ORC-RES-EXT-001：IDEMPOTENT 决策前后排序键改变。
         ResourceWorldSnapshot heldOld = snapshot(List.of(
                 reservation("APP-001", ReservationState.HELD, 2000, 1)));
         ResourceWorldSnapshot heldMoved = snapshot(List.of(
@@ -450,16 +464,31 @@ public final class ResourceScenarioChecks {
                         reservation("APP-001", ReservationState.HELD, 2000, 1),
                         "reason=SAME_ACTIVE_RESERVATION"));
         expectFail(heldMoved, List.of(firstRequest, duplicate), List.of(),
-                "ORC-RES-SYS-004", "幂等请求重排");
+                "ORC-RES-EXT-001", "幂等请求重排");
 
-        // 005：DISABLED 驱逐 holder。
+        // ORC-RES-EXT-002：DISABLED 驱逐 holder。
         ResourceWorldSnapshot holder = snapshot(List.of(
                 reservation("APP-001", ReservationState.HELD, 1000, 1)));
         ResourceWorldSnapshot evicted = snapshot(List.of(
                 reservation("APP-001", ReservationState.CANCELLED, 1000, 1)));
         ResourceStep disable = step("EVT-008", ScenarioEvent.Action.RESOURCE_SET,
                 "R01", "DISABLED", holder, evicted, null);
-        expectFail(evicted, List.of(disable), List.of(), "ORC-RES-SYS-005", "disable 驱逐 holder");
+        expectFail(evicted, List.of(disable), List.of(),
+                "ORC-RES-EXT-002", "disable 驱逐 holder");
+
+        // ORC-RES-EXT-003：晋升越过队首。
+        ResourceWorldSnapshot queued = snapshot(List.of(
+                reservation("APP-030", ReservationState.WAITING, 2000, 2),
+                reservation("APP-020", ReservationState.WAITING, 3000, 3)));
+        ResourceWorldSnapshot skipped = snapshot(List.of(
+                reservation("APP-030", ReservationState.WAITING, 2000, 2),
+                reservation("APP-020", ReservationState.HELD, 3000, 3)));
+        ResourceStep queuedStep = step("EVT-010", ScenarioEvent.Action.RESERVATION_REQUEST,
+                "R01", "", ResourceWorldSnapshot.empty(), queued, null);
+        ResourceStep skippedStep = step("EVT-011", ScenarioEvent.Action.RESERVATION_RELEASE,
+                "", "", queued, skipped, null);
+        expectFail(skipped, List.of(queuedStep, skippedStep), List.of(),
+                "ORC-RES-EXT-003", "晋升越过队首");
 
         // 006：重载前后摘要不一致。
         RestartPair badPair = new RestartPair("EVT-009", "b".repeat(64), "c".repeat(64));
@@ -669,6 +698,14 @@ public final class ResourceScenarioChecks {
                                            long offsetMillis, long logicalSequence) {
         return new Reservation(Reservation.idFor(applicationId), applicationId,
                 "D01", "SP01", "R01", state, offsetMillis, logicalSequence);
+    }
+
+    private static Reservation reservation(String reservationId, String applicationId,
+                                           String destinationId, String servicePointId,
+                                           String resourceId, ReservationState state,
+                                           long offsetMillis, long logicalSequence) {
+        return new Reservation(reservationId, applicationId, destinationId, servicePointId,
+                resourceId, state, offsetMillis, logicalSequence);
     }
 
     private static ResourceStep step(String eventId, ScenarioEvent.Action action, String resourceId,

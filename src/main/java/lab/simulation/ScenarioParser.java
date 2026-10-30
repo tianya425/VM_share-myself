@@ -51,9 +51,24 @@ public class ScenarioParser {
             "ACCEPTED",
             "NOT_FOUND");
 
-    /** Part B：资源动作 / 期望里的枚举取值。 */
-    private static final Set<String> RESOURCE_AVAILABILITIES = Set.of("ENABLED", "DISABLED");
-    private static final Set<String> RESERVATION_STATES = Set.of("HELD", "WAITING", "RELEASED", "CANCELLED");
+    /**
+     * STU-SIM-02-R1 §12.3：资源 DSL 的 ID 语法、枚举白名单与固定取值。
+     *
+     * <p>Parser 只做运行前检查（参数数量 / ID 语法 / enum allowlist / 计数 /
+     * WAIT_QUEUE 空 token 与重复 / 无参规则）；引用存在性属于事件执行期检查，
+     * 因为对象可能由前序事件创建。
+     */
+    private static final String ID_PATTERN = "[A-Za-z0-9][A-Za-z0-9_-]{0,63}";
+
+    private static final Set<String> RESOURCE_SET_VALUES = Set.of("ENABLED", "DISABLED");
+    private static final Set<String> RESOURCE_AVAILABILITY_STATES =
+            Set.of("ENABLED", "DISABLED", "MISSING");
+    private static final Set<String> RESERVATION_STATES =
+            Set.of("HELD", "WAITING", "RELEASED", "CANCELLED", "MISSING");
+    private static final Set<String> RESERVATION_DECISION_TYPES =
+            Set.of("HELD", "WAITING", "IDEMPOTENT", "CONFLICT");
+    private static final Set<String> PASS_FAIL_VALUES = Set.of("PASS", "FAIL");
+    private static final String NONE = "NONE";
 
     /**
      * 解析并校验场景文件。
@@ -364,8 +379,16 @@ public class ScenarioParser {
     }
 
     private static void checkId(String id, String field) {
-        if (id == null || !id.matches("[A-Za-z0-9][A-Za-z0-9_-]{0,63}")) {
+        if (id == null || !id.matches(ID_PATTERN)) {
             throw new ScenarioValidationException("SCENARIO_HEADER_MISSING", field + "=" + id);
+        }
+    }
+
+    /** 参数位的 ID 语法检查（不检查引用是否存在）。 */
+    private static void checkIdArg(String owner, String field, String value) {
+        if (value == null || !value.matches(ID_PATTERN)) {
+            throw new ScenarioValidationException("SCENARIO_ARGUMENT_VALUE",
+                    owner + " " + field + "=" + value);
         }
     }
 
@@ -377,6 +400,10 @@ public class ScenarioParser {
         return name == null ? "" : name.toString();
     }
 
+    /**
+     * Action 的固定参数数量（STU-SIM-02-R1 §12.1）与资源参数取值：
+     * ID 语法、RESOURCE_SET 枚举、WORLD_RESTART 无参数。
+     */
     private static void checkActionArgs(ScenarioEvent.Action action, List<String> args) {
         int need = switch (action) {
             case POINT_ADD -> 2;
@@ -388,8 +415,8 @@ public class ScenarioParser {
             case WORKFLOW_START -> 1;
             case WORKFLOW_ADVANCE -> 1;
             case DESTINATION_ADD -> 2;
-            case SERVICE_POINT_ADD -> 4;
-            case VIRTUAL_RESOURCE_ADD -> 2;
+            case SERVICE_POINT_ADD -> 3;
+            case RESOURCE_ADD -> 2;
             case RESOURCE_SET -> 2;
             case RESERVATION_REQUEST -> 4;
             case RESERVATION_RELEASE -> 1;
@@ -399,54 +426,136 @@ public class ScenarioParser {
         if (args.size() != need) {
             throw new ScenarioValidationException("SCENARIO_ARGUMENT_COUNT", action.name());
         }
-        if (action == ScenarioEvent.Action.APPLICATION_CALLBACK
-                && !CALLBACK_EVENT_TYPES.contains(args.get(1))) {
-            throw new ScenarioValidationException("SCENARIO_UNKNOWN_ACTION", args.get(1));
-        }
-        if (action == ScenarioEvent.Action.RESOURCE_SET
-                && !RESOURCE_AVAILABILITIES.contains(args.get(1))) {
-            throw new ScenarioValidationException("SCENARIO_ARGUMENT_VALUE", "RESOURCE_SET=" + args.get(1));
+        switch (action) {
+            case APPLICATION_CALLBACK -> {
+                if (!CALLBACK_EVENT_TYPES.contains(args.get(1))) {
+                    throw new ScenarioValidationException("SCENARIO_UNKNOWN_ACTION", args.get(1));
+                }
+            }
+            case RESOURCE_SET -> checkEnum("RESOURCE_SET", args.get(1), RESOURCE_SET_VALUES);
+            case DESTINATION_ADD -> checkIdArg(action.name(), "destinationId", args.get(0));
+            case SERVICE_POINT_ADD -> {
+                checkIdArg(action.name(), "servicePointId", args.get(0));
+                checkIdArg(action.name(), "destinationId", args.get(1));
+                checkIdArg(action.name(), "pointId", args.get(2));
+            }
+            case RESOURCE_ADD -> {
+                checkIdArg(action.name(), "resourceId", args.get(0));
+                checkIdArg(action.name(), "servicePointId", args.get(1));
+            }
+            case RESERVATION_REQUEST -> {
+                checkIdArg(action.name(), "applicationId", args.get(0));
+                checkIdArg(action.name(), "destinationId", args.get(1));
+                checkIdArg(action.name(), "servicePointId", args.get(2));
+                checkIdArg(action.name(), "resourceId", args.get(3));
+            }
+            case RESERVATION_RELEASE, RESERVATION_CANCEL ->
+                    checkIdArg(action.name(), "applicationId", args.get(0));
+            default -> {
+                // 其余动作的参数不做额外集合校验
+            }
         }
     }
 
     /**
-     * EXPECT 的参数数量与取值在 parse 期校验：
+     * EXPECT 的参数数量与取值在 parse 期校验（STU-SIM-02-R1 §12.3）：
      * COUNT 必须是非负整数（且不超过 int 范围），枚举必须是声明集合里的值，
+     * WAIT_QUEUE 不允许空 token / 重复 applicationId，
+     * NO_ORPHAN_RESERVATION 与 WORLD_RESTART 不接受参数；
      * 禁止留到 Oracle 运行时 parseInt / valueOf。
      */
     private static void checkOracleArgs(OracleRule.RuleType type, List<String> args) {
-        if (type == OracleRule.RuleType.QUEUE_ORDER) {
-            if (args.size() < 2) {
-                throw new ScenarioValidationException("SCENARIO_ARGUMENT_COUNT", type.name());
-            }
-        } else {
-            int need = switch (type) {
-                case APPLICATION_STATE -> 2;
-                case OUTBOX_STATUS -> 2;
-                case CREATE_CALLS -> 2;
-                case QUERY_CALLS -> 2;
-                case VALID_EXTERNAL_ORDERS -> 2;
-                case NO_DUPLICATE_EXTERNAL_ORDER -> 1;
-                case RESERVATION_STATE -> 2;
-                case HELD_COUNT -> 2;
-                case WAITING_COUNT -> 2;
-                case RESOURCE_AVAILABILITY -> 2;
-                case QUEUE_EMPTY -> 1;
-                case WORLD_RESTART_CONSISTENT -> 0;
-                case SINGLE_CAPACITY -> 1;
-                case QUEUE_ORDER -> throw new IllegalStateException("QUEUE_ORDER 已单独处理");
-            };
-            if (args.size() != need) {
-                throw new ScenarioValidationException("SCENARIO_ARGUMENT_COUNT", type.name());
-            }
+        int need = switch (type) {
+            case APPLICATION_STATE -> 2;
+            case OUTBOX_STATUS -> 2;
+            case CREATE_CALLS -> 2;
+            case QUERY_CALLS -> 2;
+            case VALID_EXTERNAL_ORDERS -> 2;
+            case NO_DUPLICATE_EXTERNAL_ORDER -> 1;
+            case RESERVATION_STATE -> 2;
+            case RESERVATION_DECISION -> 2;
+            case RESOURCE_AVAILABILITY -> 2;
+            case RESOURCE_HOLDER -> 2;
+            case WAIT_QUEUE -> 2;
+            case HELD_COUNT -> 2;
+            case NO_DOUBLE_HOLD -> 2;
+            case NO_ORPHAN_RESERVATION -> 0;
+            // ORC-RES-EXT 扩展检查（保留，不属于固定 8 项）
+            case WAITING_COUNT -> 2;
+            case QUEUE_ORDER -> -1;
+            case QUEUE_EMPTY -> 1;
+            case WORLD_RESTART_CONSISTENT -> 0;
+            case SINGLE_CAPACITY -> 1;
+        };
+        if (need < 0 ? args.size() < 2 : args.size() != need) {
+            throw new ScenarioValidationException("SCENARIO_ARGUMENT_COUNT", type.name());
         }
         switch (type) {
             case CREATE_CALLS, QUERY_CALLS, VALID_EXTERNAL_ORDERS, HELD_COUNT, WAITING_COUNT ->
                     checkCount(type.name(), args.get(1));
-            case RESERVATION_STATE -> checkEnum(type.name(), args.get(1), RESERVATION_STATES);
-            case RESOURCE_AVAILABILITY -> checkEnum(type.name(), args.get(1), RESOURCE_AVAILABILITIES);
+            case RESERVATION_STATE -> {
+                checkIdArg(type.name(), "applicationId", args.get(0));
+                checkEnum(type.name(), args.get(1), RESERVATION_STATES);
+            }
+            case RESERVATION_DECISION -> {
+                checkIdArg(type.name(), "eventId", args.get(0));
+                checkEnum(type.name(), args.get(1), RESERVATION_DECISION_TYPES);
+            }
+            case RESOURCE_AVAILABILITY -> {
+                checkIdArg(type.name(), "resourceId", args.get(0));
+                checkEnum(type.name(), args.get(1), RESOURCE_AVAILABILITY_STATES);
+            }
+            case RESOURCE_HOLDER -> {
+                checkIdArg(type.name(), "resourceId", args.get(0));
+                checkApplicationIdOrNone(type.name(), args.get(1));
+            }
+            case WAIT_QUEUE -> {
+                checkIdArg(type.name(), "resourceId", args.get(0));
+                checkWaitQueue(type.name(), args.get(1));
+            }
+            case NO_DOUBLE_HOLD -> {
+                checkIdArg(type.name(), "applicationId", args.get(0));
+                checkEnum(type.name(), args.get(1), PASS_FAIL_VALUES);
+            }
+            case NO_ORPHAN_RESERVATION -> {
+                // 固定无参数：由参数数量检查保证 args.size() == 0
+            }
+            case QUEUE_ORDER -> {
+                checkIdArg(type.name(), "resourceId", args.get(0));
+                for (int i = 1; i < args.size(); i++) {
+                    checkIdArg(type.name(), "applicationId", args.get(i));
+                }
+            }
+            case QUEUE_EMPTY, SINGLE_CAPACITY ->
+                    checkIdArg(type.name(), "resourceId", args.get(0));
             default -> {
-                // 其余类型的参数不做集合校验
+                // 其余类型的参数不做额外集合校验
+            }
+        }
+    }
+
+    /** RESOURCE_HOLDER 的第二个参数：applicationId 或 NONE。 */
+    private static void checkApplicationIdOrNone(String owner, String value) {
+        if (!NONE.equals(value)) {
+            checkIdArg(owner, "applicationId", value);
+        }
+    }
+
+    /** WAIT_QUEUE 的第二个参数：NONE 或逗号分隔的 applicationId 列表。 */
+    private static void checkWaitQueue(String owner, String value) {
+        if (NONE.equals(value)) {
+            return;
+        }
+        String[] tokens = value.split(",", -1);
+        Set<String> seen = new HashSet<>();
+        for (String token : tokens) {
+            if (token.isEmpty() || !token.matches(ID_PATTERN)) {
+                throw new ScenarioValidationException("SCENARIO_ARGUMENT_VALUE",
+                        owner + " queueToken=" + token);
+            }
+            if (!seen.add(token)) {
+                throw new ScenarioValidationException("SCENARIO_ARGUMENT_VALUE",
+                        owner + " duplicateApplicationId=" + token);
             }
         }
     }
