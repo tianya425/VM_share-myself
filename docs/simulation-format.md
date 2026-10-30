@@ -6,7 +6,7 @@
 | 日期 | 2026-10-30 |
 | 类型 | 场景文件与 Evidence 格式说明 |
 | 对应正式文档 | IDS 仿真、回放与验证架构说明书 |
-| 状态 | FROZEN（STU-SIM-02-R1 C4：固定 8 Action / 8 EXPECT 与六条系统 Oracle 恢复） |
+| 状态 | FROZEN（STU-SIM-02-R1 C6：固定 8 Action / 8 EXPECT / 21 字段 / 7 文件，运行期字段名为 eventPassCount / eventFailCount / eventSkippedCount） |
 | 绑定代码 | `lab.simulation.ScenarioParser` / `EvidenceBundleValidator` / `EvidenceBundleWriter` / `ReplayComparator` / `ResourceInvariantOracle` |
 
 ## 文档说明
@@ -200,7 +200,7 @@ Parser 在运行前完成，不把校验留到 Oracle 运行时：
 
 ### run-summary.txt：21 个固定字段
 
-`schemaVersion=2`。字段顺序固定，校验器逐行核对 `key=` 前缀，并核对 `plannedEventCount == passCount + failCount + skippedCount`、`executedEventCount == passCount + failCount`。
+`schemaVersion=2`。字段顺序固定，校验器逐行核对 `key=` 前缀，并核对 `plannedEventCount == eventPassCount + eventFailCount + eventSkippedCount`、`executedEventCount == eventPassCount + eventFailCount`。
 
 | # | 字段 | 说明 |
 |---:|---|---|
@@ -213,9 +213,9 @@ Parser 在运行前完成，不把校验留到 Oracle 运行时：
 | 7 | `runStatus` | `COMPLETED` / `FAILED` / `INCONCLUSIVE` |
 | 8 | `plannedEventCount` | 计划事件数 |
 | 9 | `executedEventCount` | 实际执行事件数（首错即停后不再增加） |
-| 10 | `passCount` | 通过事件数 |
-| 11 | `failCount` | 失败事件数 |
-| 12 | `skippedCount` | 跳过事件数 |
+| 10 | `eventPassCount` | 通过事件数 |
+| 11 | `eventFailCount` | 失败事件数 |
+| 12 | `eventSkippedCount` | 跳过事件数 |
 | 13 | `firstFailureEventId` | 首个失败事件编号；无失败时为 `-` |
 | 14 | `firstFailureCode` | 首个失败稳定 code；无失败时为 `-` |
 | 15 | `oraclePassCount` | Oracle 结果 PASS 数 |
@@ -337,3 +337,6 @@ Parser 在运行前完成，不把校验留到 Oracle 运行时：
 - 已执行场景不得覆盖原文件
 - 兼容性检查以 digest 为准
 - `schemaVersion` 变更 → 旧证据包不再通过新校验器（本项目不跟踪旧证据包；交付包一律用新 writer 重新生成）
+
+FINAL_SOURCE_IDENTITY=BOUND_BY_EXTERNAL_DELIVERY_RECEIPT
+DELIVERY_RECEIPT=delivery-receipt.txt

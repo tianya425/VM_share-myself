@@ -1,105 +1,44 @@
-# 仿真基础边界
+# 仿真边界与证据等级（STU-SIM-02-R1）
 
-| 文档属性 | 内容 |
-|---|---|
-| 版本 | V0.6 |
-| 日期 | 2026-10-24 |
-| 状态 | FROZEN |
-| 证据等级 | LOCAL_SIMULATION |
+## 一、范围
 
-## 前置 main commit
+本仓库只做**本地确定性仿真**：由固定 `.scenario` 文件驱动既有业务入口，在进程内生成 Evidence。
 
-- 仓库：`logistics-intake-practice`（GitHub 私有练习仓库；地址不写入文档，见 ZIP 外 `delivery-receipt.txt`）
-- 最终 main：`c9416e2`（PR5/6 合并提交，双亲 `13d4e58` + `cf574c1`）；合并链 `30bb272` → `88bf021` → `439209e` → `13d4e58` → `c9416e2`
-- 最终交付 ZIP 与 SHA-256 记录在 ZIP 外的 `delivery-receipt.txt`；Part A 历史 ZIP 仍按 `439209e` 快照（见 receipt）
-- 分阶段复验记录：`docs/delivery-verification.md` §7—§10
+- 证据等级固定：`LOCAL_SIMULATION`
+- 真实外部写固定：`realExternalWrites=0`
+- 虚拟机时间、网络、真实设备均不参与业务结论
+- 全部时间来自场景 `START_AT` 与虚拟偏移，禁止系统时钟
 
-## 基线环境
+## 二、允许边界
 
-- Ubuntu 24.04 虚拟机
-- OpenJDK 21.0.12.1 / javac 21.0.12.1（`--release 21 -encoding UTF-8`，class `major version: 65`）
-- UTF-8
-- SQLite JDBC 驱动：`lib/sqlite-jdbc-3.46.1.3.jar`
-- jar SHA-256：`4a4832720a65eaf7f4d6fd7ede52087b994dc5633c076f9e994dc0c8b4b0b4fa`
+- 本地 Java 21 编译与运行
+- 本地文件 / SQLite 存储（仅 `build/`、临时目录）
+- Fake RCS 适配器（`ScriptedFakeRcsAdapter` / `FakeRcsAdapter`）
+- `WORLD_RESTART`：保留同一 Storage / Clock / Fake，丢弃 Registry 与 Target 后用 `loadState()` 重建
 
-## 基线事实（2026-10-24 实测，main=c9416e2）
+## 三、禁止边界
 
-- `src/main/java` Java 文件：69（`lab` 31 + `lab.simulation` 38，其中 `lab.simulation.resource` 9）
-- `src/test/java` Java 文件：8
-- `cases/*.in`：30；`scenarios/`：17（3 基础合法 + 3 基础非法 + 6 资源合法 + 5 资源非法）
-- `CHECKS_PASSED=279`、`CONCURRENCY_CHECKS_PASSED=8`、`RELIABILITY_R1_CASES_PASSED=14`
-- `SCENARIO_PARSER_CASES_PASSED=16`、`SIMULATION_RUNTIME_CASES_PASSED=18`、`REPLAY_EVIDENCE_R1_CASES_PASSED=12`
-- `RESOURCE_WORLD_CASES_PASSED=24`、`RESOURCE_STORAGE_CASES_PASSED=6`、`RESOURCE_PARSER_CASES_PASSED=7`、`RESOURCE_SCENARIO_CASES_PASSED=10`
-- 30 个旧 case 逐字节 diff：`originalCases=30`
+- 不连接真实 M4、AGV、线边仓、PLC、MES、上位机或生产数据库
+- 不登录、探测或修改实验室服务器与现场网络
+- 不产生任何真实外部写；不以网络请求替代本地 Fake
+- 不声称 `M4_CONTRACT_PASS`、`VERIFIED_LAB`、`SITE_PASS`、`PRODUCTION_READY`、`CAPACITY_PASS`
+- 不把本地仿真结论写成实验环境、Shadow、Canary 或生产就绪
 
-## 允许边界
+## 四、M4 不适用
 
-- Ubuntu 24 虚拟机、Java 21、GitHub 私有练习仓库
-- 合成点位和合成申请
-- `MemoryStorage` / `FileStorage` / `SqliteStorage`
-- `ScriptedFakeRcsAdapter`（本地 Java 类，按脚本返回固定结果）
-- `lab.simulation.resource` 的本地虚拟世界（`VirtualResourceWorld`、`Reservation`、`ServicePoint`、`Destination`）
-- 仓库内 `scenarios` / `cases` / `build/runs` / `docs`
+本任务的资源合同（Destination / ServicePoint / VirtualResource / Reservation）是练习用的本地领域模型，不是真实 M4 字段合同，也不对接真实调度系统。六项资源 mutation 只在临时 clone 中注入，主分支不保留错误代码。
 
-## 禁止边界
+## 五、验证事实（2026-10-30）
 
-- 登录、探测或修改 lab-server-01
-- 访问实验室 Windows 工作站、NAS、公司设备或现场网络
-- 读取或使用 M4 账号、License、配置、日志、数据库、IP、端口、凭据、证书或 Machine Code
-- 实现 M4 HTTP、WebSocket、TCP、Callback、Candidate 或 Forced 的真实字段合同
-- 连接真实 AGV、线边仓、PLC、MES、上位机或数据库
-- 场景文件保存真实客户、设备或生产数据
-- 修改正式 IDS Product / Private 仓库
-- 将练习分支直接 merge、copy 或 cherry-pick 到正式产品主线
-- 使用网络请求替代本地 Fake
-- 使用真实 `Thread.sleep` 等待逻辑时间到达
-- 使用系统当前时间作为场景业务结论的一部分
-- 将本地资源仿真（单容量、固定队列、虚拟时钟、`ScriptedFakeRcsAdapter`）声明为真实 AGV / PLC / MES 调度结论
+- 唯一命令：`bash scripts/verify-simulation.sh`，24 项全过，退出码 0
+- 终点行：`SIMULATION_RESOURCE_VERIFICATION_PASS originalCases=30 ... realExternalWrites=0`
+- 30 旧 case 逐字节通过；24 个资源世界 case、42 个整改合同 case、10 个场景 case 全过
+- 6 合法场景各双跑一致；5 非法场景 exit=1 且保留最后已提交快照
+- 6 项 mutation 均被目标检查检出，随后恢复干净源码
 
-## M4 不适用
+## 六、回执绑定
 
-真实 M4 合同（MVP-REQ-10）不在本轮练习范围：没有 M4 账号、License、端点、字段合同与现场网络，因此与 M4 对齐的任何结论都不成立。M4 相关项固定记为不适用（`N/A`），不得被读作已通过。
+最终 commit / tree / ZIP / bundle 不在 Git 跟踪文档内自引用，统一由仓库外回执绑定：
 
-## Evidence Level 与零真实外部写
-
-`evidenceLevel=LOCAL_SIMULATION`（每条证据的 `ORC-SYS-005` 断言，`run-summary.txt` 第 20 字段同值）。
-
-外部执行端口固定为 `ScriptedFakeRcsAdapter`，证据记录 `ORC-SYS-006` PASS、`realExternalWriteCount=0`（每条证据第 21 字段），全部证据包求和为 `realExternalWrites=0`。
-
-禁止声明的结果（文档中只以禁止清单形式出现）：
-
-- M4_CONTRACT_PASS
-- VERIFIED_LAB
-- SITE_PASS
-- PRODUCTION_READY
-- CAPACITY_PASS
-
-## 资源仿真的边界
-
-- 资源容量固定为 1；同一资源同一时刻最多一个 HELD
-- 队列稳定键为 `offsetMillis → logicalSequence → applicationId`；晋升只取队首
-- 终态 `RELEASED` / `CANCELLED` 不可重开
-- `WORLD_RESTART` 保留同一 Storage / Clock / Fake，丢弃并重建 Registry 与 Target，不触发外部调用
-- 资源动作只作用于 `lab.simulation.resource` 的虚拟世界，不代表真实 AGV / 线边仓 / PLC 的调度合同
-
-## 未执行项
-
-- 未连接真实 M4
-- 未连接真实 AGV
-- 未连接真实 PLC
-- 未连接真实 MES
-- 未连接真实数据库
-- 未执行任何真实外部写
-- 未执行 Lab 综合验证、Shadow、Canary、Site Acceptance、容量测试
-- 资源运行时 / 资源场景只在本地仿真验证；未接入真实调度系统
-- 未做真实资源容量、真实队列优先级与真实重放验证
-
-## 当前验证事实
-
-唯一验证命令：
-
-    bash scripts/verify-simulation.sh
-
-终点行（2026-10-24 实测，逐字）：
-
-    SIMULATION_RESOURCE_VERIFICATION_PASS originalCases=30 baseValidScenarios=3 baseInvalidScenarios=3 resourceValidScenarios=6 resourceInvalidScenarios=5 resourceReplay=6 realExternalWrites=0
+FINAL_SOURCE_IDENTITY=BOUND_BY_EXTERNAL_DELIVERY_RECEIPT
+DELIVERY_RECEIPT=delivery-receipt.txt
