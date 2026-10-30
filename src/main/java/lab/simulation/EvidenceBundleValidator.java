@@ -60,9 +60,9 @@ public class EvidenceBundleValidator {
             "runStatus",
             "plannedEventCount",
             "executedEventCount",
-            "passCount",
-            "failCount",
-            "skippedCount",
+            "eventPassCount",
+            "eventFailCount",
+            "eventSkippedCount",
             "firstFailureEventId",
             "firstFailureCode",
             "oraclePassCount",
@@ -191,9 +191,9 @@ public class EvidenceBundleValidator {
         }
         int planned = intField(lines, "plannedEventCount");
         int executed = intField(lines, "executedEventCount");
-        int pass = intField(lines, "passCount");
-        int fail = intField(lines, "failCount");
-        int skipped = intField(lines, "skippedCount");
+        int pass = intField(lines, "eventPassCount");
+        int fail = intField(lines, "eventFailCount");
+        int skipped = intField(lines, "eventSkippedCount");
         if (planned != pass + fail + skipped) {
             throw new EvidenceValidationException("EVIDENCE_SUMMARY_ARITHMETIC",
                     "planned=" + planned + " pass+fail+skipped=" + (pass + fail + skipped));

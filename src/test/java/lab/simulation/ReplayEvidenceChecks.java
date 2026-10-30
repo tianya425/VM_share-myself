@@ -47,9 +47,9 @@ public final class ReplayEvidenceChecks {
             "runStatus",
             "plannedEventCount",
             "executedEventCount",
-            "passCount",
-            "failCount",
-            "skippedCount",
+            "eventPassCount",
+            "eventFailCount",
+            "eventSkippedCount",
             "firstFailureEventId",
             "firstFailureCode",
             "oraclePassCount",
@@ -182,9 +182,9 @@ public final class ReplayEvidenceChecks {
 
         int planned = intField(summary, "plannedEventCount");
         int executed = intField(summary, "executedEventCount");
-        int pass = intField(summary, "passCount");
-        int fail = intField(summary, "failCount");
-        int skipped = intField(summary, "skippedCount");
+        int pass = intField(summary, "eventPassCount");
+        int fail = intField(summary, "eventFailCount");
+        int skipped = intField(summary, "eventSkippedCount");
         require(planned == pass + fail + skipped, "planned!=pass+fail+skipped：" + planned + " vs "
                 + (pass + fail + skipped));
         require(executed == pass + fail, "executed!=pass+fail：" + executed + " vs " + (pass + fail));
@@ -326,7 +326,8 @@ public final class ReplayEvidenceChecks {
 
         List<String> summary = readLines(evidence.resolve("run-summary.txt"));
         require("FAILED".equals(field(summary, "runStatus")), "runStatus=" + field(summary, "runStatus"));
-        require("1".equals(field(summary, "failCount")), "failCount=" + field(summary, "failCount"));
+        require("1".equals(field(summary, "eventFailCount")),
+                "eventFailCount=" + field(summary, "eventFailCount"));
 
         Path viaCli = tmpDir.resolve("rpl11-cli");
         CliResult cli = cli("run", scenario.toAbsolutePath().toString(), viaCli.toString());

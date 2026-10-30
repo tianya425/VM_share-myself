@@ -22,7 +22,10 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.regex.Pattern;
 
 /**
  * Part B / PR5—PR6：资源运行时与资源场景的 10 项具名检查 RSC-01 — RSC-10。
@@ -38,11 +41,71 @@ public final class ResourceScenarioChecks {
 
     private static final List<String> VALID_SCENARIOS = List.of(
             "scenarios/resource/sim-101-single-hold-release.scenario",
-            "scenarios/resource/sim-102-queue-order.scenario",
-            "scenarios/resource/sim-103-queue-promotion.scenario",
-            "scenarios/resource/sim-104-idempotent-request.scenario",
+            "scenarios/resource/sim-102-contention-promotion.scenario",
+            "scenarios/resource/sim-103-idempotent-request.scenario",
+            "scenarios/resource/sim-104-conflicting-target.scenario",
             "scenarios/resource/sim-105-disable-enable.scenario",
             "scenarios/resource/sim-106-restart-recovery.scenario");
+
+    private static final List<String> VALID_SCENARIO_IDS = List.of(
+            "SIM-101", "SIM-102", "SIM-103", "SIM-104", "SIM-105", "SIM-106");
+
+    /** 固定 8 项场景 EXPECT 的 ruleType（§12.2）。 */
+    private static final List<String> FIXED_EXPECTS = List.of(
+            "RESERVATION_STATE", "RESERVATION_DECISION", "RESOURCE_AVAILABILITY",
+            "RESOURCE_HOLDER", "WAIT_QUEUE", "HELD_COUNT",
+            "NO_DOUBLE_HOLD", "NO_ORPHAN_RESERVATION");
+
+    /** 每个合法场景必须出现的 EXPECT 行（ruleType + 参数），逐字按任务书 §14。 */
+    private static final Map<String, List<String>> REQUIRED_EXPECT = new LinkedHashMap<>();
+
+    static {
+        REQUIRED_EXPECT.put("SIM-101", List.of(
+                "RESERVATION_STATE APP-101 RELEASED",
+                "RESOURCE_HOLDER RES-01 NONE",
+                "WAIT_QUEUE RES-01 NONE",
+                "HELD_COUNT RES-01 0",
+                "NO_ORPHAN_RESERVATION"));
+        REQUIRED_EXPECT.put("SIM-102", List.of(
+                "RESERVATION_STATE APP-102-A RELEASED",
+                "RESERVATION_STATE APP-102-B HELD",
+                "RESOURCE_HOLDER RES-01 APP-102-B",
+                "WAIT_QUEUE RES-01 NONE",
+                "HELD_COUNT RES-01 1",
+                "NO_DOUBLE_HOLD APP-102-A PASS",
+                "NO_DOUBLE_HOLD APP-102-B PASS",
+                "NO_ORPHAN_RESERVATION"));
+        REQUIRED_EXPECT.put("SIM-103", List.of(
+                "RESERVATION_STATE APP-103 HELD",
+                "RESERVATION_DECISION EVT-008 IDEMPOTENT",
+                "RESOURCE_HOLDER RES-01 APP-103",
+                "HELD_COUNT RES-01 1",
+                "NO_DOUBLE_HOLD APP-103 PASS",
+                "NO_ORPHAN_RESERVATION"));
+        REQUIRED_EXPECT.put("SIM-104", List.of(
+                "RESERVATION_DECISION EVT-011 CONFLICT",
+                "RESERVATION_STATE APP-104 HELD",
+                "RESOURCE_HOLDER RES-01 APP-104",
+                "RESOURCE_HOLDER RES-02 NONE",
+                "HELD_COUNT RES-01 1",
+                "HELD_COUNT RES-02 0",
+                "NO_ORPHAN_RESERVATION"));
+        REQUIRED_EXPECT.put("SIM-105", List.of(
+                "RESOURCE_AVAILABILITY RES-01 DISABLED",
+                "RESERVATION_STATE APP-105 RELEASED",
+                "RESOURCE_HOLDER RES-01 NONE",
+                "WAIT_QUEUE RES-01 NONE",
+                "HELD_COUNT RES-01 0",
+                "RESERVATION_DECISION EVT-008 WAITING",
+                "NO_ORPHAN_RESERVATION"));
+        REQUIRED_EXPECT.put("SIM-106", List.of(
+                "RESERVATION_STATE APP-106-A RELEASED",
+                "RESERVATION_STATE APP-106-B HELD",
+                "RESOURCE_HOLDER RES-01 APP-106-B",
+                "WAIT_QUEUE RES-01 NONE",
+                "HELD_COUNT RES-01 1",
+                "NO_ORPHAN_RESERVATION"));
+    }
 
     private static final List<String> RESOURCE_INVARIANTS = List.of(
             "ORC-RES-SYS-001", "ORC-RES-SYS-002", "ORC-RES-SYS-003",
@@ -118,161 +181,158 @@ public final class ResourceScenarioChecks {
 
     private static void rsc01() {
         require(VALID_SCENARIOS.size() == 6, "合法场景数=" + VALID_SCENARIOS.size());
-        for (String scenario : VALID_SCENARIOS) {
-            RuntimeRun run = runScenario(scenario);
-            require("COMPLETED".equals(run.result().runStatus()),
-                    scenario + " runStatus=" + run.result().runStatus()
-                            + " firstFailure=" + run.result().firstFailureCode());
-            require(run.result().oracleFailCount() == 0,
-                    scenario + " oracleFail=" + run.result().oracleFailCount());
-            for (String oracleId : RESOURCE_INVARIANTS) {
-                require(statusOf(run.result().oracleResults(), oracleId) == OracleResult.Status.PASS,
-                        scenario + " " + oracleId + "=" + statusOf(run.result().oracleResults(), oracleId));
+        for (int i = 0; i < VALID_SCENARIOS.size(); i++) {
+            String scenario = VALID_SCENARIOS.get(i);
+            String scenarioId = VALID_SCENARIO_IDS.get(i);
+            String text = readText(scenario);
+            require(text.startsWith("SCENARIO " + scenarioId + " "),
+                    scenario + " 头部 scenarioId 不符：" + firstLine(text));
+            for (String required : REQUIRED_EXPECT.get(scenarioId)) {
+                require(hasExpect(text, required),
+                        scenario + " 缺少 EXPECT " + required);
             }
+            CliResult validate = cli("validate", scenario);
+            require(validate.exitCode() == 0,
+                    scenario + " validate exit=" + validate.exitCode() + " 输出=" + validate.output());
+            Path evidence = tmpDir.resolve("valid-" + scenarioId);
+            CliResult run = cli("run", scenario, evidence.toString());
+            require(run.exitCode() == 0, scenario + " run exit=" + run.exitCode()
+                    + " 输出=" + run.output());
+            require(run.output().contains("RUN_COMPLETED " + scenarioId),
+                    scenario + " 缺少 RUN_COMPLETED，" + run.output());
+            require(run.output().contains("EVIDENCE_WRITTEN " + evidence),
+                    scenario + " 缺少 EVIDENCE_WRITTEN，" + run.output());
+            new EvidenceBundleValidator().validate(evidence);
+            require("COMPLETED".equals(summaryValue(evidence, "runStatus")),
+                    scenario + " runStatus=" + summaryValue(evidence, "runStatus"));
+            require("0".equals(summaryValue(evidence, "realExternalWriteCount")),
+                    scenario + " realExternalWriteCount="
+                            + summaryValue(evidence, "realExternalWriteCount"));
+            require(scenarioId.equals(summaryValue(evidence, "scenarioId")),
+                    scenario + " summary scenarioId=" + summaryValue(evidence, "scenarioId"));
+
             int expects = 0;
-            for (OracleResult result : run.result().oracleResults()) {
-                if (result.oracleId().startsWith("ORC-1")) {
+            for (String[] row : tsvRows(evidence.resolve("oracle-results.tsv"))) {
+                String oracleId = row[0];
+                String ruleType = row[1];
+                String status = row[2];
+                if (RESOURCE_INVARIANTS.contains(oracleId)) {
+                    require("PASS".equals(status),
+                            scenario + " " + oracleId + "=" + status);
+                }
+                if (FIXED_EXPECTS.contains(ruleType)) {
                     expects++;
-                    require(result.status() == OracleResult.Status.PASS,
-                            scenario + " " + result.oracleId() + "=" + result.status());
+                    require("PASS".equals(status),
+                            scenario + " " + oracleId + "(" + ruleType + ")=" + status
+                                    + " actual=" + row[4]);
                 }
             }
-            require(expects > 0, scenario + " 没有资源 EXPECT 行");
+            require(expects > 0, scenario + " 没有固定 EXPECT 结果");
         }
-        // 重复请求场景必须真的把第二次 request 记为 IDEMPOTENT。
-        RuntimeRun idempotent = runScenario(VALID_SCENARIOS.get(3));
-        require(idempotent.runtime().reservationDecisions().containsKey("EVT-008"),
-                "SIM-104 缺少 EVT-008 的 ReservationDecision");
-        require(idempotent.runtime().reservationDecisions().get("EVT-008").type()
-                        == ReservationDecision.DecisionType.IDEMPOTENT,
-                "SIM-104 EVT-008 type="
-                        + idempotent.runtime().reservationDecisions().get("EVT-008").type());
     }
 
     // ================= RSC-02 =================
 
     private static void rsc02() {
-        Registry registry = world();
-        application(registry, "APP-001");
-        application(registry, "APP-030");
-        application(registry, "APP-020");
-
-        require(request(registry, "APP-001", 1000, 1).type()
-                        == ReservationDecision.DecisionType.HELD,
-                "APP-001 首次请求应为 HELD");
-        require(request(registry, "APP-030", 2000, 2).type()
-                        == ReservationDecision.DecisionType.WAITING,
-                "APP-030 首次请求应为 WAITING");
-        require(request(registry, "APP-020", 3000, 3).type()
-                        == ReservationDecision.DecisionType.WAITING,
-                "APP-020 首次请求应为 WAITING");
-        require(waitingOrder(registry, "R01").equals(List.of("APP-030", "APP-020")),
-                "队列顺序=" + waitingOrder(registry, "R01"));
-
-        registry.releaseReservation("APP-001");
-        require(stateOf(registry, "APP-001") == ReservationState.RELEASED,
-                "APP-001=" + stateOf(registry, "APP-001"));
-        require(stateOf(registry, "APP-030") == ReservationState.HELD,
-                "release 后队首应为 APP-030，实际=" + stateOf(registry, "APP-030"));
-        require(stateOf(registry, "APP-020") == ReservationState.WAITING,
-                "APP-020 仍应 WAITING，实际=" + stateOf(registry, "APP-020"));
-
-        registry.releaseReservation("APP-030");
-        require(stateOf(registry, "APP-020") == ReservationState.HELD,
-                "再次 release 后 APP-020 应为 HELD，实际=" + stateOf(registry, "APP-020"));
-        require(waitingOrder(registry, "R01").isEmpty(),
-                "队列应为空，实际=" + waitingOrder(registry, "R01"));
+        RuntimeRun run = runScenario(VALID_SCENARIOS.get(1));
+        require("COMPLETED".equals(run.result().runStatus()),
+                "SIM-102 runStatus=" + run.result().runStatus());
+        ResourceWorldSnapshot world = run.runtime().resourceWorldSnapshot();
+        require(stateOf(world, "APP-102-A") == ReservationState.RELEASED,
+                "APP-102-A=" + stateOf(world, "APP-102-A"));
+        require(stateOf(world, "APP-102-B") == ReservationState.HELD,
+                "APP-102-B=" + stateOf(world, "APP-102-B"));
+        require("APP-102-B".equals(holderOf(world, "RES-01")),
+                "holder=" + holderOf(world, "RES-01"));
+        require(waitingOf(world, "RES-01").isEmpty(),
+                "queue=" + waitingOf(world, "RES-01"));
+        Reservation a = reservationOf(world, "APP-102-A");
+        Reservation b = reservationOf(world, "APP-102-B");
+        require(a.requestedOffsetMillis() == b.requestedOffsetMillis(),
+                "offset 不同：A=" + a.requestedOffsetMillis() + " B=" + b.requestedOffsetMillis());
+        require(a.requestedLogicalSequence() < b.requestedLogicalSequence(),
+                "A 的 logicalSequence 必须更小：A=" + a.requestedLogicalSequence()
+                        + " B=" + b.requestedLogicalSequence());
+        require(decisionType(run, "EVT-008") == ReservationDecision.DecisionType.HELD,
+                "A 首次请求 type=" + decisionType(run, "EVT-008"));
+        require(decisionType(run, "EVT-009") == ReservationDecision.DecisionType.WAITING,
+                "B 首次请求 type=" + decisionType(run, "EVT-009"));
     }
 
     // ================= RSC-03 =================
 
     private static void rsc03() {
-        Registry registry = world();
-        application(registry, "APP-001");
-        application(registry, "APP-030");
-        application(registry, "APP-020");
-        request(registry, "APP-001", 1000, 1);
-        request(registry, "APP-030", 2000, 2);
-        request(registry, "APP-020", 3000, 3);
-
-        String before = registry.resourceWorldSnapshot().canonicalText();
-        ReservationDecision duplicate = request(registry, "APP-030", 9999, 99);
-        require(duplicate.type() == ReservationDecision.DecisionType.IDEMPOTENT,
-                "重复请求 type=" + duplicate.type());
-        require(before.equals(registry.resourceWorldSnapshot().canonicalText()),
-                "重复请求改变了规范快照");
-        Reservation queued = reservationOf(registry, "APP-030");
-        require(queued.requestedOffsetMillis() == 2000 && queued.requestedLogicalSequence() == 2,
-                "重复请求改动了排序键：offset=" + queued.requestedOffsetMillis()
-                        + " seq=" + queued.requestedLogicalSequence());
-        require(waitingOrder(registry, "R01").equals(List.of("APP-030", "APP-020")),
-                "重复请求改动了队列：=" + waitingOrder(registry, "R01"));
-
-        String beforeHeld = registry.resourceWorldSnapshot().canonicalText();
-        ReservationDecision duplicateHeld = request(registry, "APP-001", 8888, 88);
-        require(duplicateHeld.type() == ReservationDecision.DecisionType.IDEMPOTENT,
-                "HELD 重复请求 type=" + duplicateHeld.type());
-        require(beforeHeld.equals(registry.resourceWorldSnapshot().canonicalText()),
-                "HELD 重复请求改变了规范快照");
-        require(reservationOf(registry, "APP-001").requestedOffsetMillis() == 1000,
-                "HELD 重复请求改动了排序键");
+        RuntimeRun run = runScenario(VALID_SCENARIOS.get(2));
+        require("COMPLETED".equals(run.result().runStatus()),
+                "SIM-103 runStatus=" + run.result().runStatus());
+        require(decisionType(run, "EVT-008") == ReservationDecision.DecisionType.IDEMPOTENT,
+                "SIM-103 EVT-008 type=" + decisionType(run, "EVT-008"));
+        ResourceStep duplicate = stepOf(run.runtime().resourceSteps(), "EVT-008");
+        require(duplicate != null, "SIM-103 缺少 EVT-008 的 ResourceStep");
+        require(duplicate.decision() != null
+                        && duplicate.decision().type() == ReservationDecision.DecisionType.IDEMPOTENT,
+                "EVT-008 decision=" + (duplicate.decision() == null
+                        ? "null" : duplicate.decision().type()));
+        require(duplicate.before().canonicalText().equals(duplicate.after().canonicalText()),
+                "第二次请求改变了规范快照");
+        List<Reservation> entries = reservationsOf(run.runtime().resourceWorldSnapshot(), "APP-103");
+        require(entries.size() == 1, "APP-103 条目数=" + entries.size());
+        require(entries.get(0).state() == ReservationState.HELD,
+                "APP-103 state=" + entries.get(0).state());
+        require(entries.get(0).requestedOffsetMillis() == 2000
+                        && entries.get(0).requestedLogicalSequence() == 70,
+                "排序键被改动：offset=" + entries.get(0).requestedOffsetMillis()
+                        + " seq=" + entries.get(0).requestedLogicalSequence());
     }
 
     // ================= RSC-04 =================
 
     private static void rsc04() {
-        Registry registry = world();
-        addSecondTarget(registry);
-        application(registry, "APP-001");
-        request(registry, "APP-001", 1000, 1);
-
-        String before = registry.resourceWorldSnapshot().canonicalText();
-        ReservationDecision decision;
-        try {
-            decision = registry.requestReservation("APP-001", "D02", "SP02", "R02", 2000, 2);
-        } catch (RuntimeException e) {
-            throw new AssertionError("同申请不同目标抛异常 expected=无异常(CONFLICT) actual=" + e);
-        }
-        require(decision.type() == ReservationDecision.DecisionType.CONFLICT,
-                "type=" + decision.type() + " 期望 CONFLICT");
-        require("reason=DIFFERENT_ACTIVE_TARGET".equals(decision.detail()),
-                "detail=" + decision.detail() + " 期望 reason=DIFFERENT_ACTIVE_TARGET");
-        require(before.equals(registry.resourceWorldSnapshot().canonicalText()),
-                "CONFLICT 后规范快照发生变化");
-        require(stateOf(registry, "APP-001") == ReservationState.HELD,
-                "CONFLICT 后 APP-001=" + stateOf(registry, "APP-001"));
-        require(waitingOrder(registry, "R01").isEmpty(),
-                "CONFLICT 后队列=" + waitingOrder(registry, "R01"));
+        RuntimeRun run = runScenario(VALID_SCENARIOS.get(3));
+        require("COMPLETED".equals(run.result().runStatus()),
+                "SIM-104 runStatus=" + run.result().runStatus());
+        require(decisionType(run, "EVT-011") == ReservationDecision.DecisionType.CONFLICT,
+                "SIM-104 EVT-011 type=" + decisionType(run, "EVT-011"));
+        ResourceWorldSnapshot world = run.runtime().resourceWorldSnapshot();
+        List<Reservation> entries = reservationsOf(world, "APP-104");
+        require(entries.size() == 1, "APP-104 条目数=" + entries.size());
+        require("RES-01".equals(entries.get(0).resourceId()),
+                "APP-104 绑定资源=" + entries.get(0).resourceId());
+        require(entries.get(0).state() == ReservationState.HELD,
+                "APP-104 state=" + entries.get(0).state());
+        require(holderOf(world, "RES-02") == null,
+                "RES-02 holder=" + holderOf(world, "RES-02"));
+        require(holderOf(world, "RES-01") != null
+                        && holderOf(world, "RES-01").equals("APP-104"),
+                "RES-01 holder=" + holderOf(world, "RES-01"));
     }
 
     // ================= RSC-05 =================
 
     private static void rsc05() {
-        Registry registry = world();
-        application(registry, "APP-001");
-        application(registry, "APP-002");
-
-        request(registry, "APP-001", 1000, 1);
-        registry.setVirtualResourceAvailability("R01", ResourceAvailability.DISABLED);
-        require(availabilityOf(registry, "R01") == ResourceAvailability.DISABLED,
-                "R01 availability=" + availabilityOf(registry, "R01"));
-        require(stateOf(registry, "APP-001") == ReservationState.HELD,
-                "disable 驱逐了 holder：APP-001=" + stateOf(registry, "APP-001"));
-
-        require(request(registry, "APP-002", 2000, 2).type()
-                        == ReservationDecision.DecisionType.WAITING,
-                "DISABLED 期间的新请求应为 WAITING");
-        registry.setVirtualResourceAvailability("R01", ResourceAvailability.ENABLED);
-        require(stateOf(registry, "APP-001") == ReservationState.HELD,
-                "enable 越过 holder 晋升：APP-001=" + stateOf(registry, "APP-001"));
-        require(stateOf(registry, "APP-002") == ReservationState.WAITING,
-                "enable 时无空位，APP-002 仍应 WAITING，实际=" + stateOf(registry, "APP-002"));
-
-        registry.releaseReservation("APP-001");
-        require(stateOf(registry, "APP-002") == ReservationState.HELD,
-                "release 后 APP-002 应晋升 HELD，实际=" + stateOf(registry, "APP-002"));
-        require(waitingOrder(registry, "R01").isEmpty(),
-                "晋升后队列应为空，实际=" + waitingOrder(registry, "R01"));
+        RuntimeRun run = runScenario(VALID_SCENARIOS.get(4));
+        require("COMPLETED".equals(run.result().runStatus()),
+                "SIM-105 runStatus=" + run.result().runStatus());
+        ResourceWorldSnapshot world = run.runtime().resourceWorldSnapshot();
+        require(availabilityOf(world, "RES-01") == ResourceAvailability.DISABLED,
+                "RES-01 availability=" + availabilityOf(world, "RES-01"));
+        require(stateOf(world, "APP-105") == ReservationState.RELEASED,
+                "APP-105=" + stateOf(world, "APP-105"));
+        require(holderOf(world, "RES-01") == null,
+                "holder=" + holderOf(world, "RES-01"));
+        require(waitingOf(world, "RES-01").isEmpty(),
+                "queue=" + waitingOf(world, "RES-01"));
+        require(decisionType(run, "EVT-008") == ReservationDecision.DecisionType.WAITING,
+                "DISABLED 期间请求 type=" + decisionType(run, "EVT-008"));
+        ResourceStep enable = stepOf(run.runtime().resourceSteps(), "EVT-009");
+        require(enable != null, "缺少 EVT-009 ResourceStep");
+        require(stateOf(enable.after(), "APP-105") == ReservationState.HELD,
+                "ENABLED 后 APP-105=" + stateOf(enable.after(), "APP-105"));
+        ResourceStep disableAgain = stepOf(run.runtime().resourceSteps(), "EVT-010");
+        require(disableAgain != null, "缺少 EVT-010 ResourceStep");
+        require(stateOf(disableAgain.after(), "APP-105") == ReservationState.HELD,
+                "再次 DISABLED 驱逐了 holder：APP-105="
+                        + stateOf(disableAgain.after(), "APP-105"));
     }
 
     // ================= RSC-06 =================
@@ -293,33 +353,39 @@ public final class ResourceScenarioChecks {
                 "WORLD_RESTART 触发了外部调用：" + run.runtime().externalCallAttempts());
         require(run.runtime().interactions().isEmpty(),
                 "WORLD_RESTART 产生了外部交互：" + run.runtime().interactions());
-        // 重载后的派生结构必须能继续工作：release 真实发生了晋升。
-        require(stateOf(run.runtime().resourceWorldSnapshot(), "APP-001") == ReservationState.RELEASED,
-                "APP-001=" + stateOf(run.runtime().resourceWorldSnapshot(), "APP-001"));
-        require(stateOf(run.runtime().resourceWorldSnapshot(), "APP-002") == ReservationState.HELD,
-                "APP-002=" + stateOf(run.runtime().resourceWorldSnapshot(), "APP-002"));
+        ResourceWorldSnapshot world = run.runtime().resourceWorldSnapshot();
+        require(stateOf(world, "APP-106-A") == ReservationState.RELEASED,
+                "APP-106-A=" + stateOf(world, "APP-106-A"));
+        require(stateOf(world, "APP-106-B") == ReservationState.HELD,
+                "APP-106-B=" + stateOf(world, "APP-106-B"));
+        require("APP-106-B".equals(holderOf(world, "RES-01")),
+                "holder=" + holderOf(world, "RES-01"));
+        OracleResult restart = findResult(run.result().oracleResults(), "ORC-RES-SYS-006");
+        require(restart.status() == OracleResult.Status.PASS,
+                "ORC-RES-SYS-006=" + restart.status());
+        require(restart.actual().matches("restartPairs=2,mismatches=0"),
+                "ORC-RES-SYS-006 actual=" + restart.actual());
     }
 
     // ================= RSC-07 =================
 
     private static void rsc07() {
         String[][] invalid = {
-                {"scenarios/resource/invalid/sim-invalid-101-missing-destination.scenario",
-                        "SIM-INVALID-101", "RESOURCE_TARGET_MISMATCH", "EVT-007"},
-                {"scenarios/resource/invalid/sim-invalid-102-missing-point.scenario",
-                        "SIM-INVALID-102", "UNKNOWN_POINT", "EVT-004"},
-                {"scenarios/resource/invalid/sim-invalid-103-conflict.scenario",
-                        "SIM-INVALID-103", "RESERVATION_CONFLICT", "EVT-011"},
-                {"scenarios/resource/invalid/sim-invalid-104-terminal-reopen.scenario",
-                        "SIM-INVALID-104", "RESERVATION_TERMINAL", "EVT-009"},
-                {"scenarios/resource/invalid/sim-invalid-105-reference-mismatch.scenario",
-                        "SIM-INVALID-105", "RESOURCE_TARGET_MISMATCH", "EVT-008"}};
+                {"scenarios/resource/invalid/missing-destination.scenario",
+                        "SIM-INVALID-101", "RESOURCE_DESTINATION_NOT_FOUND"},
+                {"scenarios/resource/invalid/target-mismatch.scenario",
+                        "SIM-INVALID-102", "RESOURCE_TARGET_MISMATCH"},
+                {"scenarios/resource/invalid/duplicate-conflicting-id.scenario",
+                        "SIM-INVALID-103", "RESOURCE_DUPLICATE_CONFLICT"},
+                {"scenarios/resource/invalid/release-non-holder.scenario",
+                        "SIM-INVALID-104", "RESERVATION_NOT_HELD"},
+                {"scenarios/resource/invalid/terminal-reopen.scenario",
+                        "SIM-INVALID-105", "RESERVATION_TERMINAL"}};
         require(invalid.length == 5, "非法场景数=" + invalid.length);
         for (String[] item : invalid) {
             String scenario = item[0];
             String scenarioId = item[1];
             String code = item[2];
-            String failingEvent = item[3];
             Path evidence = tmpDir.resolve("invalid-" + scenarioId);
             CliResult cli = cli("run", scenario, evidence.toString());
             require(cli.exitCode() == 1, scenario + " 退出码=" + cli.exitCode()
@@ -330,9 +396,21 @@ public final class ResourceScenarioChecks {
             require(cli.output().contains("EVIDENCE_WRITTEN " + evidence),
                     scenario + " 缺少 EVIDENCE_WRITTEN，输出=" + cli.output());
             new EvidenceBundleValidator().validate(evidence);
+            require("FAILED".equals(summaryValue(evidence, "runStatus")),
+                    scenario + " runStatus=" + summaryValue(evidence, "runStatus"));
+            require("0".equals(summaryValue(evidence, "realExternalWriteCount")),
+                    scenario + " realExternalWriteCount="
+                            + summaryValue(evidence, "realExternalWriteCount"));
+
+            RuntimeRun run = runScenario(scenario);
+            require(code.equals(run.result().firstFailureCode()),
+                    scenario + " firstFailureCode=" + run.result().firstFailureCode());
+            String failingEvent = run.result().firstFailureEventId();
+            require(failingEvent != null, scenario + " firstFailureEventId=null");
 
             List<String> timeline = readLines(evidence.resolve("event-timeline.tsv"));
             boolean sawFailure = false;
+            int skipped = 0;
             for (int i = 1; i < timeline.size(); i++) {
                 String[] cells = timeline.get(i).split("\t", -1);
                 String eventId = cells[0];
@@ -345,17 +423,32 @@ public final class ResourceScenarioChecks {
                         require(status.equals("EVENT_PASS"), scenario + " " + eventId + "=" + status);
                     }
                 } else {
+                    skipped++;
                     require(status.equals("EVENT_SKIPPED"),
                             scenario + " 首错后 " + eventId + "=" + status + "，期望 EVENT_SKIPPED");
                 }
             }
             require(sawFailure, scenario + " 时间线未出现失败事件 " + failingEvent);
+            require(skipped > 0, scenario + " 首错后没有 EVENT_SKIPPED 事件");
 
-            RuntimeRun run = runScenario(scenario);
-            require(code.equals(run.result().firstFailureCode()),
-                    scenario + " firstFailureCode=" + run.result().firstFailureCode());
-            require(failingEvent.equals(run.result().firstFailureEventId()),
-                    scenario + " firstFailureEventId=" + run.result().firstFailureEventId());
+            // 保留最后已提交快照：场景 EXPECT 必须对保留快照求值并 PASS；六条系统 Oracle 继续执行。
+            int expects = 0;
+            for (String[] row : tsvRows(evidence.resolve("oracle-results.tsv"))) {
+                String oracleId = row[0];
+                String ruleType = row[1];
+                String status = row[2];
+                if (RESOURCE_INVARIANTS.contains(oracleId)) {
+                    require("PASS".equals(status),
+                            scenario + " " + oracleId + "=" + status + " actual=" + row[4]);
+                }
+                if (FIXED_EXPECTS.contains(ruleType)) {
+                    expects++;
+                    require("PASS".equals(status),
+                            scenario + " " + oracleId + "(" + ruleType + ")=" + status
+                                    + " actual=" + row[4]);
+                }
+            }
+            require(expects > 0, scenario + " 没有保留快照 EXPECT 结果");
         }
     }
 
@@ -363,13 +456,51 @@ public final class ResourceScenarioChecks {
 
     private static void rsc08() throws Exception {
         for (int i = 0; i < VALID_SCENARIOS.size(); i++) {
-            Path scenario = Path.of(VALID_SCENARIOS.get(i));
-            Path a = produce("rsc08-" + (i + 1) + "-a", scenario);
-            Path b = produce("rsc08-" + (i + 1) + "-b", scenario);
+            String scenario = VALID_SCENARIOS.get(i);
+            Path a = tmpDir.resolve("rsc08-" + (i + 1) + "-a");
+            Path b = tmpDir.resolve("rsc08-" + (i + 1) + "-b");
+            for (Path dir : List.of(a, b)) {
+                CliResult cli = cli("run", scenario, dir.toString());
+                require(cli.exitCode() == 0, scenario + " run exit=" + cli.exitCode()
+                        + " 输出=" + cli.output());
+                require(cli.output().contains("EVIDENCE_WRITTEN " + dir),
+                        scenario + " 缺少 EVIDENCE_WRITTEN，" + cli.output());
+                new EvidenceBundleValidator().validate(dir);
+                require("COMPLETED".equals(summaryValue(dir, "runStatus")),
+                        scenario + " " + dir + " runStatus=" + summaryValue(dir, "runStatus"));
+                require("0".equals(summaryValue(dir, "realExternalWriteCount")),
+                        scenario + " " + dir + " realExternalWriteCount="
+                                + summaryValue(dir, "realExternalWriteCount"));
+            }
             for (String fileName : EvidenceBundleValidator.MANIFEST_FILES) {
                 long mismatch = Files.mismatch(a.resolve(fileName), b.resolve(fileName));
                 require(mismatch == -1, scenario + " 两次运行的 " + fileName
                         + " 不一致（首个差异字节=" + mismatch + "）");
+            }
+            for (String fileName : List.of("manifest.sha256", "scenario.sha256")) {
+                long mismatch = Files.mismatch(a.resolve(fileName), b.resolve(fileName));
+                require(mismatch == -1, scenario + " 两次运行的 " + fileName
+                        + " 不一致（首个差异字节=" + mismatch + "）");
+            }
+            List<String> manifest = readLines(a.resolve("manifest.sha256"));
+            require(manifest.size() == 6, scenario + " manifest 行数=" + manifest.size());
+            List<String> names = new ArrayList<>();
+            for (String line : manifest) {
+                names.add(line.substring(line.indexOf("  ") + 2));
+            }
+            require(names.equals(EvidenceBundleValidator.MANIFEST_FILES),
+                    scenario + " manifest 文件集/顺序=" + names);
+            require(summaryValue(a, "scenarioId").equals(summaryValue(b, "scenarioId")),
+                    scenario + " 两跑 scenarioId 不一致");
+            require(summaryValue(a, "scenarioVersion").equals("1"),
+                    scenario + " scenarioVersion=" + summaryValue(a, "scenarioVersion"));
+            require(summaryValue(a, "scenarioDigest").equals(summaryValue(b, "scenarioDigest")),
+                    scenario + " 两跑 scenarioDigest 不一致");
+            for (String field : List.of("schemaVersion", "runStatus", "plannedEventCount",
+                    "executedEventCount", "eventPassCount", "eventFailCount",
+                    "eventSkippedCount", "firstFailureEventId", "firstFailureCode",
+                    "realExternalWriteCount")) {
+                require(summaryValue(a, field) != null, scenario + " 缺少字段 " + field);
             }
             ReplayResult replay = new ReplayComparator().compare(a, b);
             require(replay.isMatch(), scenario + " compare=" + replay.toLine());
@@ -527,6 +658,106 @@ public final class ResourceScenarioChecks {
         require(unscripted.output().contains("RUN_FAILED SIM-INVALID-03 UNSCRIPTED_EXTERNAL_CALL"),
                 "unscripted 输出=" + unscripted.output());
         new EvidenceBundleValidator().validate(evidence);
+    }
+
+    // ================= 证据/场景读取辅助 =================
+
+    private static String readText(String file) {
+        try {
+            return Files.readString(Path.of(file), StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            throw new AssertionError("读取失败：" + file + " " + e);
+        }
+    }
+
+    private static String firstLine(String text) {
+        int index = text.indexOf('\n');
+        return index < 0 ? text : text.substring(0, index);
+    }
+
+    private static boolean hasExpect(String text, String required) {
+        return Pattern.compile("(?m)^EXPECT \\S+ " + Pattern.quote(required) + "\\s*$")
+                .matcher(text).find();
+    }
+
+    private static String summaryValue(Path evidenceDir, String key) {
+        for (String line : readLines(evidenceDir.resolve("run-summary.txt"))) {
+            if (line.startsWith(key + "=")) {
+                return line.substring(key.length() + 1);
+            }
+        }
+        return null;
+    }
+
+    private static List<String[]> tsvRows(Path file) {
+        List<String[]> rows = new ArrayList<>();
+        List<String> lines = readLines(file);
+        for (int i = 1; i < lines.size(); i++) {
+            rows.add(lines.get(i).split("\t", -1));
+        }
+        return rows;
+    }
+
+    private static List<Reservation> reservationsOf(ResourceWorldSnapshot world, String applicationId) {
+        List<Reservation> matches = new ArrayList<>();
+        for (Reservation reservation : world.reservations()) {
+            if (reservation.applicationId().equals(applicationId)) {
+                matches.add(reservation);
+            }
+        }
+        return matches;
+    }
+
+    private static Reservation reservationOf(ResourceWorldSnapshot world, String applicationId) {
+        List<Reservation> matches = reservationsOf(world, applicationId);
+        if (matches.size() != 1) {
+            throw new AssertionError("预约条目数=" + matches.size() + " app=" + applicationId);
+        }
+        return matches.get(0);
+    }
+
+    private static String holderOf(ResourceWorldSnapshot world, String resourceId) {
+        for (Reservation reservation : world.reservations()) {
+            if (reservation.resourceId().equals(resourceId)
+                    && reservation.state() == ReservationState.HELD) {
+                return reservation.applicationId();
+            }
+        }
+        return null;
+    }
+
+    private static List<String> waitingOf(ResourceWorldSnapshot world, String resourceId) {
+        List<String> queue = new ArrayList<>();
+        for (Reservation reservation : world.reservations()) {
+            if (reservation.resourceId().equals(resourceId)
+                    && reservation.state() == ReservationState.WAITING) {
+                queue.add(reservation.applicationId());
+            }
+        }
+        return queue;
+    }
+
+    private static ResourceAvailability availabilityOf(ResourceWorldSnapshot world, String resourceId) {
+        for (VirtualResource resource : world.resources()) {
+            if (resource.resourceId().equals(resourceId)) {
+                return resource.availability();
+            }
+        }
+        return null;
+    }
+
+    private static ResourceStep stepOf(List<ResourceStep> steps, String eventId) {
+        for (ResourceStep step : steps) {
+            if (step.eventId().equals(eventId)) {
+                return step;
+            }
+        }
+        return null;
+    }
+
+    private static ReservationDecision.DecisionType decisionType(RuntimeRun run, String eventId) {
+        ReservationDecision decision = run.runtime().reservationDecisions().get(eventId);
+        return decision == null ? null : decision.type();
     }
 
     // ================= 基础设施 =================
