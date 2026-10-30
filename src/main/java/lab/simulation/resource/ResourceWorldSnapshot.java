@@ -10,7 +10,7 @@ import java.util.List;
  * 资源世界的规范快照。
  *
  * <p>深不可变：四个集合一律 {@link List#copyOf}，并按固定键排序（目的地/服务点/资源按编号，
- * 预约按 offset → logicalSequence → applicationId）。不存派生 Map，也不在加载时做交叉校验；
+ * 预约按 requestedOffsetMillis → requestedLogicalSequence → applicationId）。不存派生 Map，也不在加载时做交叉校验；
  * 引用完整性在 {@link VirtualResourceWorld} 的写入操作里 fail-closed。
  */
 public record ResourceWorldSnapshot(
@@ -45,8 +45,7 @@ public record ResourceWorldSnapshot(
         for (ServicePoint servicePoint : servicePoints) {
             builder.append("S|").append(servicePoint.servicePointId()).append('|')
                     .append(servicePoint.destinationId()).append('|')
-                    .append(servicePoint.registryPointId()).append('|')
-                    .append(servicePoint.name()).append('\n');
+                    .append(servicePoint.pointId()).append('\n');
         }
         for (VirtualResource resource : resources) {
             builder.append("R|").append(resource.resourceId()).append('|')
@@ -60,8 +59,8 @@ public record ResourceWorldSnapshot(
                     .append(reservation.servicePointId()).append('|')
                     .append(reservation.resourceId()).append('|')
                     .append(reservation.state().name()).append('|')
-                    .append(reservation.offsetMillis()).append('|')
-                    .append(reservation.logicalSequence()).append('\n');
+                    .append(reservation.requestedOffsetMillis()).append('|')
+                    .append(reservation.requestedLogicalSequence()).append('\n');
         }
         return builder.toString();
     }
@@ -118,8 +117,8 @@ public record ResourceWorldSnapshot(
         }
         List<Reservation> copy = new ArrayList<>(values);
         copy.sort(Comparator
-                .comparingLong(Reservation::offsetMillis)
-                .thenComparingLong(Reservation::logicalSequence)
+                .comparingLong(Reservation::requestedOffsetMillis)
+                .thenComparingLong(Reservation::requestedLogicalSequence)
                 .thenComparing(Reservation::applicationId));
         return copy;
     }

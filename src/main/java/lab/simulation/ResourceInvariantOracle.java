@@ -21,7 +21,7 @@ import java.util.Set;
  *
  * <ol>
  *   <li>ORC-RES-SYS-001 单容量：任一观察点上，同一资源最多一个 HELD；</li>
- *   <li>ORC-RES-SYS-002 队列顺序：WAITING 按 offset → logicalSequence → applicationId 排队，
+ *   <li>ORC-RES-SYS-002 队列顺序：WAITING 按 requestedOffsetMillis → requestedLogicalSequence → applicationId 排队，
  *       晋升只能取队首（不能越过更小的键）；</li>
  *   <li>ORC-RES-SYS-003 终态单调：RELEASED / CANCELLED 之后不得再变回非终态；</li>
  *   <li>ORC-RES-SYS-004 幂等稳定：IDEMPOTENT 决策不得改动原预约的编号、排序键或状态；</li>
@@ -135,11 +135,11 @@ public final class ResourceInvariantOracle {
     }
 
     private static int compareKey(Reservation a, Reservation b) {
-        int byOffset = Long.compare(a.offsetMillis(), b.offsetMillis());
+        int byOffset = Long.compare(a.requestedOffsetMillis(), b.requestedOffsetMillis());
         if (byOffset != 0) {
             return byOffset;
         }
-        int bySequence = Long.compare(a.logicalSequence(), b.logicalSequence());
+        int bySequence = Long.compare(a.requestedLogicalSequence(), b.requestedLogicalSequence());
         if (bySequence != 0) {
             return bySequence;
         }
@@ -226,7 +226,7 @@ public final class ResourceInvariantOracle {
         String detail = "";
         for (ResourceStep step : steps) {
             ReservationDecision decision = step.decision();
-            if (decision == null || decision.outcome() != ReservationDecision.Outcome.IDEMPOTENT) {
+            if (decision == null || decision.type() != ReservationDecision.DecisionType.IDEMPOTENT) {
                 continue;
             }
             idempotent++;
@@ -240,8 +240,8 @@ public final class ResourceInvariantOracle {
                     && before.servicePointId().equals(after.servicePointId())
                     && before.resourceId().equals(after.resourceId())
                     && before.state() == after.state()
-                    && before.offsetMillis() == after.offsetMillis()
-                    && before.logicalSequence() == after.logicalSequence();
+                    && before.requestedOffsetMillis() == after.requestedOffsetMillis()
+                    && before.requestedLogicalSequence() == after.requestedLogicalSequence();
             if (!stable) {
                 mismatches++;
                 if (detail.isEmpty()) {
@@ -286,8 +286,8 @@ public final class ResourceInvariantOracle {
         if (reservation == null) {
             return "null";
         }
-        return reservation.state() + "@" + reservation.offsetMillis()
-                + "/" + reservation.logicalSequence();
+        return reservation.state() + "@" + reservation.requestedOffsetMillis()
+                + "/" + reservation.requestedLogicalSequence();
     }
 
     // ---------- ORC-RES-SYS-005 ----------

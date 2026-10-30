@@ -147,14 +147,14 @@ public final class ResourceContractCorrectionChecks {
         Throwable failure = capture(() -> decision[0] =
                 registry.requestReservation("APP-001", "D01", "SP01", "R01", 0, 10));
         require(failure == null, "推进到 DISPATCHED 后重复 request 抛异常 expected=IDEMPOTENT actual=" + failure);
-        require(decision[0].outcome() == ReservationDecision.Outcome.IDEMPOTENT,
-                "outcome=" + decision[0].outcome() + " expected=IDEMPOTENT");
+        require(decision[0].type() == ReservationDecision.DecisionType.IDEMPOTENT,
+                "type=" + decision[0].type() + " expected=IDEMPOTENT");
         require(canonical(registry).equals(before), "重复 request 后快照变了");
         require(reservations(registry).size() == beforeCount,
                 "条目数=" + reservations(registry).size() + " expected=" + beforeCount);
         Reservation kept = reservationOf(registry, "APP-001");
-        require(kept.offsetMillis() == 0L && kept.logicalSequence() == 10L,
-                "排序键变了 offset=" + kept.offsetMillis() + " seq=" + kept.logicalSequence() + " expected=0/10");
+        require(kept.requestedOffsetMillis() == 0L && kept.requestedLogicalSequence() == 10L,
+                "排序键变了 offset=" + kept.requestedOffsetMillis() + " seq=" + kept.requestedLogicalSequence() + " expected=0/10");
     }
 
     // ================= R1-CON-02 =================
@@ -170,14 +170,14 @@ public final class ResourceContractCorrectionChecks {
         registry.requestReservation("APP-002", "D01", "SP01", "R01", 0, 10);
         String before = canonical(registry);
 
-        ReservationDecision.Outcome conflict = requireOutcome("CONFLICT");
+        ReservationDecision.DecisionType conflict = requireDecisionType("CONFLICT");
 
         ReservationDecision[] decision = new ReservationDecision[1];
         Throwable failure = capture(() -> decision[0] =
                 registry.requestReservation("APP-002", "D02", "SP02", "R02", 20, 10));
         require(failure == null, "换目标 request 抛异常 expected=无异常(CONFLICT) actual=" + failure);
-        require(decision[0].outcome() == conflict,
-                "outcome=" + decision[0].outcome() + " expected=CONFLICT");
+        require(decision[0].type() == conflict,
+                "type=" + decision[0].type() + " expected=CONFLICT");
         require(canonical(registry).equals(before), "换目标后快照变了");
     }
 
@@ -252,9 +252,9 @@ public final class ResourceContractCorrectionChecks {
             require(captureChecked(() -> ctor.newInstance("SP01", null, "P01")) != null,
                     "destinationId=null 未抛异常 expected=构造立即失败 actual=无异常");
             require(captureChecked(() -> ctor.newInstance("SP01", "D01", null)) != null,
-                    "registryPointId=null 未抛异常 expected=构造立即失败 actual=无异常");
+                    "pointId=null 未抛异常 expected=构造立即失败 actual=无异常");
             require(captureChecked(() -> ctor.newInstance("SP01", "D01", "")) != null,
-                    "registryPointId=空 未抛异常 expected=构造立即失败 actual=无异常");
+                    "pointId=空 未抛异常 expected=构造立即失败 actual=无异常");
         } catch (NoSuchMethodException e) {
             throw new AssertionError("缺少 3 参数 ServicePoint 构造器 expected=存在 actual=" + e);
         }
@@ -365,7 +365,7 @@ public final class ResourceContractCorrectionChecks {
     private static void r1Load06() {
         ResourceWorldSnapshot world = new ResourceWorldSnapshot(
                 List.of(new Destination("D01", "一号目的地")),
-                List.of(new ServicePoint("SP01", "D01", "P99", "一号服务点")),
+                List.of(new ServicePoint("SP01", "D01", "P99")),
                 List.of(new VirtualResource("R01", "SP01")),
                 List.of());
         require(loadFailure(loadState(baselinePoints(), baselineApps(), world)) != null,
@@ -414,7 +414,7 @@ public final class ResourceContractCorrectionChecks {
 
         ResourceWorldSnapshot bad = new ResourceWorldSnapshot(
                 List.of(new Destination("D01", "一号目的地")),
-                List.of(new ServicePoint("SP01", "D01", "P01", "一号服务点")),
+                List.of(new ServicePoint("SP01", "D01", "P01")),
                 List.of(new VirtualResource("R01", "SP01")),
                 List.of(reservation("RSV-APP-001", "APP-001", "D01", "SP01", "R99", ReservationState.HELD, 0, 10)));
         OracleResult result = orcResult(bad, List.of(), List.of(), "ORC-RES-SYS-003");
@@ -656,7 +656,7 @@ public final class ResourceContractCorrectionChecks {
         seedChain(registry);
         String before = canonical(registry);
         storage.failNextCommit();
-        expectInjectedFailure(() -> registry.addServicePoint("SP02", "D01", "P02", "二号服务点"),
+        expectInjectedFailure(() -> registry.addServicePoint("SP02", "D01", "P02"),
                 "addServicePoint 提交失败");
         require(canonical(registry).equals(before), "addServicePoint 提交失败后快照变了");
         require(servicePoints(registry).size() == 1,
@@ -787,13 +787,13 @@ public final class ResourceContractCorrectionChecks {
             registry.registerApplication(String.format("APP-%03d", i), "P01", "P02");
         }
         registry.addDestination("D01", "一号目的地");
-        registry.addServicePoint("SP01", "D01", "P01", "一号服务点");
+        registry.addServicePoint("SP01", "D01", "P01");
         registry.addVirtualResource("R01", "SP01");
     }
 
     private static void addSecondTarget(Registry registry) {
         registry.addDestination("D02", "二号目的地");
-        registry.addServicePoint("SP02", "D02", "P02", "二号服务点");
+        registry.addServicePoint("SP02", "D02", "P02");
         registry.addVirtualResource("R02", "SP02");
     }
 
@@ -869,7 +869,7 @@ public final class ResourceContractCorrectionChecks {
     private static ResourceWorldSnapshot baselineWorld(List<Reservation> reservations) {
         return new ResourceWorldSnapshot(
                 List.of(new Destination("D01", "一号目的地")),
-                List.of(new ServicePoint("SP01", "D01", "P01", "一号服务点")),
+                List.of(new ServicePoint("SP01", "D01", "P01")),
                 List.of(new VirtualResource("R01", "SP01")),
                 reservations);
     }
@@ -928,11 +928,11 @@ public final class ResourceContractCorrectionChecks {
 
     // ================= 反射辅助 =================
 
-    private static ReservationDecision.Outcome requireOutcome(String name) {
+    private static ReservationDecision.DecisionType requireDecisionType(String name) {
         try {
-            return ReservationDecision.Outcome.valueOf(name);
+            return ReservationDecision.DecisionType.valueOf(name);
         } catch (IllegalArgumentException e) {
-            throw new AssertionError("缺少 Outcome 常量 " + name);
+            throw new AssertionError("缺少 DecisionType 常量 " + name);
         }
     }
 

@@ -12,8 +12,11 @@ import java.util.List;
  * 调用方（Registry）负责把新快照放进候选 RegistryState 并单次 commitState。
  *
  * <p>fail-closed 约定：加载快照时不做事先的交叉校验；任何操作一旦遇到悬空引用
- * （资源缺 ServicePoint、ServicePoint 缺 Destination 等），一律抛
- * {@code RESOURCE_TARGET_MISMATCH}，绝不放行。
+ * （资源缺 ServicePoint、ServicePoint 缺 Destination 等），一律 fail-closed，绝不放行。
+ * 错误码遵循 STU-SIM-02-R1 §9.3：
+ * Destination 不存在 → {@code RESOURCE_DESTINATION_NOT_FOUND}；
+ * ServicePoint 不存在 → {@code RESOURCE_SERVICE_POINT_NOT_FOUND}；
+ * Resource 不存在 → {@code RESOURCE_NOT_FOUND}。
  */
 public final class VirtualResourceWorld {
 
@@ -58,11 +61,11 @@ public final class VirtualResourceWorld {
     // ---------- ServicePoint ----------
 
     /**
-     * 新增 ServicePoint：Destination 与 Registry Point 必须已存在（后者由 Registry 校验）。
+     * 新增 ServicePoint：Destination 必须已存在（Registry Point 由 Registry 校验）。
      */
     public VirtualResourceWorld addServicePoint(ServicePoint servicePoint) {
         if (findDestination(servicePoint.destinationId()) == null) {
-            throw new RegistryException("RESOURCE_UNKNOWN_DESTINATION", servicePoint.destinationId());
+            throw new RegistryException("RESOURCE_DESTINATION_NOT_FOUND", servicePoint.destinationId());
         }
         ServicePoint existing = findServicePoint(servicePoint.servicePointId());
         if (existing != null) {
@@ -80,15 +83,16 @@ public final class VirtualResourceWorld {
     // ---------- VirtualResource ----------
 
     /**
-     * 新增 VirtualResource：ServicePoint 必须已存在；新资源默认 ENABLED。
+     * 新增 VirtualResource：ServicePoint 必须已存在；新资源默认 ENABLED；
+     * 同 ID 同内容幂等，同 ID 不同内容 → {@code RESOURCE_DUPLICATE_CONFLICT}。
      */
     public VirtualResourceWorld addVirtualResource(VirtualResource resource) {
         if (findServicePoint(resource.servicePointId()) == null) {
-            throw new RegistryException("RESOURCE_UNKNOWN_SERVICE_POINT", resource.servicePointId());
+            throw new RegistryException("RESOURCE_SERVICE_POINT_NOT_FOUND", resource.servicePointId());
         }
         VirtualResource existing = findResource(resource.resourceId());
         if (existing != null) {
-            if (existing.servicePointId().equals(resource.servicePointId())) {
+            if (existing.equals(resource)) {
                 return this;
             }
             throw new RegistryException("RESOURCE_DUPLICATE_CONFLICT", resource.resourceId());
@@ -100,12 +104,13 @@ public final class VirtualResourceWorld {
     }
 
     /**
-     * 设置可用性：DISABLED 不驱逐已 HELD 的持有者；ENABLED 且无 holder 时晋升队首。
+     * 设置可用性：DISABLED 不驱逐已 HELD 的持有者，重复 DISABLED 幂等；
+     * ENABLED 且无 holder 时晋升队首（变化与晋升合并为同一个返回的新世界）。
      */
     public VirtualResourceWorld setAvailability(String resourceId, ResourceAvailability availability) {
         VirtualResource existing = findResource(resourceId);
         if (existing == null) {
-            throw new RegistryException("RESOURCE_UNKNOWN_RESOURCE", resourceId);
+            throw new RegistryException("RESOURCE_NOT_FOUND", resourceId);
         }
         if (existing.availability() == availability) {
             return this;
@@ -124,63 +129,19 @@ public final class VirtualResourceWorld {
     // ---------- Reservation ----------
 
     /**
-     * 请求预约：引用链必须一致；终态不可重开；同申请不同目标冲突；同目标重复请求幂等。
-     *
-     * <p>返回新世界（幂等时返回 {@code this}）。
+     * 追加一条新预约。只负责构造新世界，不判断既有预约、不校验引用链：
+     * requestReservation 的「存在性 → 引用链 → HELD/WAITING」顺序由 Registry
+     * 按 STU-SIM-02-R1 §9.1 执行后调用本方法。
      */
-    public VirtualResourceWorld request(String applicationId,
-                                        String destinationId,
-                                        String servicePointId,
-                                        String resourceId,
-                                        long offsetMillis,
-                                        long logicalSequence) {
-        VirtualResource resource = findResource(resourceId);
-        if (resource == null) {
-            throw new RegistryException("RESOURCE_UNKNOWN_RESOURCE", resourceId);
-        }
-        ServicePoint servicePoint = findServicePoint(servicePointId);
-        if (servicePoint == null
-                || !resource.servicePointId().equals(servicePointId)
-                || !servicePoint.destinationId().equals(destinationId)
-                || findDestination(destinationId) == null) {
-            throw new RegistryException("RESOURCE_TARGET_MISMATCH", applicationId);
-        }
-
-        Reservation existing = findReservation(applicationId);
-        if (existing != null) {
-            if (existing.isTerminal()) {
-                throw new RegistryException("RESERVATION_TERMINAL", applicationId);
-            }
-            boolean sameTarget = existing.destinationId().equals(destinationId)
-                    && existing.servicePointId().equals(servicePointId)
-                    && existing.resourceId().equals(resourceId);
-            if (sameTarget) {
-                return this;
-            }
-            throw new RegistryException("RESERVATION_CONFLICT", applicationId);
-        }
-
-        boolean canHold = resource.availability() == ResourceAvailability.ENABLED
-                && !hasHeld(resourceId)
-                && !hasWaiting(resourceId);
-        ReservationState state = canHold ? ReservationState.HELD : ReservationState.WAITING;
-        Reservation created = new Reservation(
-                Reservation.idFor(applicationId),
-                applicationId,
-                destinationId,
-                servicePointId,
-                resourceId,
-                state,
-                offsetMillis,
-                logicalSequence);
+    public VirtualResourceWorld addReservation(Reservation reservation) {
         List<Reservation> next = new ArrayList<>(snapshot.reservations());
-        next.add(created);
+        next.add(reservation);
         return new VirtualResourceWorld(new ResourceWorldSnapshot(
                 snapshot.destinations(), snapshot.servicePoints(), snapshot.resources(), next));
     }
 
     /**
-     * 释放 HELD 预约，并晋升该资源的队首。
+     * 释放 HELD 预约，并晋升该资源的队首（DISABLED 时不晋升；释放与晋升合并为一次世界变更）。
      */
     public VirtualResourceWorld release(String applicationId) {
         Reservation existing = findReservation(applicationId);
@@ -198,7 +159,7 @@ public final class VirtualResourceWorld {
     }
 
     /**
-     * 取消 HELD 或 WAITING 预约；取消 HELD 后晋升队首。
+     * 取消 HELD 或 WAITING 预约；取消 HELD 且 ENABLED 时晋升队首（DISABLED 时不晋升）。
      */
     public VirtualResourceWorld cancel(String applicationId) {
         Reservation existing = findReservation(applicationId);
@@ -257,9 +218,8 @@ public final class VirtualResourceWorld {
         return null;
     }
 
-    // ---------- 内部 ----------
-
-    private boolean hasHeld(String resourceId) {
+    /** 该资源当前是否已有 HELD 预约。 */
+    public boolean hasHeld(String resourceId) {
         for (Reservation reservation : snapshot.reservations()) {
             if (reservation.resourceId().equals(resourceId)
                     && reservation.state() == ReservationState.HELD) {
@@ -269,7 +229,8 @@ public final class VirtualResourceWorld {
         return false;
     }
 
-    private boolean hasWaiting(String resourceId) {
+    /** 该资源当前是否已有 WAITING 预约。 */
+    public boolean hasWaiting(String resourceId) {
         for (Reservation reservation : snapshot.reservations()) {
             if (reservation.resourceId().equals(resourceId)
                     && reservation.state() == ReservationState.WAITING) {
@@ -278,6 +239,8 @@ public final class VirtualResourceWorld {
         }
         return false;
     }
+
+    // ---------- 内部 ----------
 
     private VirtualResourceWorld replaceReservation(Reservation updated) {
         List<Reservation> next = new ArrayList<>(snapshot.reservations().size());
@@ -291,8 +254,8 @@ public final class VirtualResourceWorld {
     /**
      * 晋升队首：资源 ENABLED、无 HELD 时，把队列最小键的 WAITING 变 HELD。
      *
-     * <p>快照内预约已按 offset → logicalSequence → applicationId 排好序，
-     * 因此第一个 WAITING 就是队首。
+     * <p>快照内预约已按 requestedOffsetMillis → requestedLogicalSequence →
+     * applicationId 排好序，因此第一个 WAITING 就是队首。
      */
     private VirtualResourceWorld promote(String resourceId) {
         VirtualResource resource = findResource(resourceId);

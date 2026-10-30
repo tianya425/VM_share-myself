@@ -144,8 +144,9 @@ public class SimulationRuntime {
             case WORKFLOW_START -> target.workflowStart(args.get(0));
             case WORKFLOW_ADVANCE -> target.workflowAdvance(args.get(0));
             case DESTINATION_ADD -> target.destinationAdd(args.get(0), args.get(1));
-            case SERVICE_POINT_ADD -> target.servicePointAdd(
-                    args.get(0), args.get(1), args.get(2), args.get(3));
+            // STU-SIM-02-R1 C2：ServicePoint 三字段合同（无 name）。旧场景文件第 4 个
+            // DSL token（历史 name）仍被解析但在此忽略；场景文件重建属于 C5 范围。
+            case SERVICE_POINT_ADD -> target.servicePointAdd(args.get(0), args.get(1), args.get(2));
             case VIRTUAL_RESOURCE_ADD -> target.virtualResourceAdd(args.get(0), args.get(1));
             case RESOURCE_SET -> target.resourceSetAvailability(args.get(0), args.get(1));
             case RESERVATION_REQUEST -> {

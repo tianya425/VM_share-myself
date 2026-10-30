@@ -64,7 +64,7 @@ public final class ResourceScenarioChecks {
     private static final String INTENT_03 =
             "完全相同重复 request → IDEMPOTENT，条目不增、原排序键与队列顺序不变";
     private static final String INTENT_04 =
-            "同申请不同目标 → RESERVATION_CONFLICT，状态与规范快照逐字不变";
+            "同申请不同目标 → CONFLICT 决策（不抛异常），状态与规范快照逐字不变";
     private static final String INTENT_05 =
             "disable 不驱逐 holder；disable 期间新请求 WAITING；enable 不越过 holder；release 后晋升";
     private static final String INTENT_06 =
@@ -143,10 +143,10 @@ public final class ResourceScenarioChecks {
         RuntimeRun idempotent = runScenario(VALID_SCENARIOS.get(3));
         require(idempotent.runtime().reservationDecisions().containsKey("EVT-008"),
                 "SIM-104 缺少 EVT-008 的 ReservationDecision");
-        require(idempotent.runtime().reservationDecisions().get("EVT-008").outcome()
-                        == ReservationDecision.Outcome.IDEMPOTENT,
-                "SIM-104 EVT-008 outcome="
-                        + idempotent.runtime().reservationDecisions().get("EVT-008").outcome());
+        require(idempotent.runtime().reservationDecisions().get("EVT-008").type()
+                        == ReservationDecision.DecisionType.IDEMPOTENT,
+                "SIM-104 EVT-008 type="
+                        + idempotent.runtime().reservationDecisions().get("EVT-008").type());
     }
 
     // ================= RSC-02 =================
@@ -157,14 +157,14 @@ public final class ResourceScenarioChecks {
         application(registry, "APP-030");
         application(registry, "APP-020");
 
-        require(request(registry, "APP-001", 1000, 1).outcome()
-                        == ReservationDecision.Outcome.HELD,
+        require(request(registry, "APP-001", 1000, 1).type()
+                        == ReservationDecision.DecisionType.HELD,
                 "APP-001 首次请求应为 HELD");
-        require(request(registry, "APP-030", 2000, 2).outcome()
-                        == ReservationDecision.Outcome.WAITING,
+        require(request(registry, "APP-030", 2000, 2).type()
+                        == ReservationDecision.DecisionType.WAITING,
                 "APP-030 首次请求应为 WAITING");
-        require(request(registry, "APP-020", 3000, 3).outcome()
-                        == ReservationDecision.Outcome.WAITING,
+        require(request(registry, "APP-020", 3000, 3).type()
+                        == ReservationDecision.DecisionType.WAITING,
                 "APP-020 首次请求应为 WAITING");
         require(waitingOrder(registry, "R01").equals(List.of("APP-030", "APP-020")),
                 "队列顺序=" + waitingOrder(registry, "R01"));
@@ -197,24 +197,24 @@ public final class ResourceScenarioChecks {
 
         String before = registry.resourceWorldSnapshot().canonicalText();
         ReservationDecision duplicate = request(registry, "APP-030", 9999, 99);
-        require(duplicate.outcome() == ReservationDecision.Outcome.IDEMPOTENT,
-                "重复请求 outcome=" + duplicate.outcome());
+        require(duplicate.type() == ReservationDecision.DecisionType.IDEMPOTENT,
+                "重复请求 type=" + duplicate.type());
         require(before.equals(registry.resourceWorldSnapshot().canonicalText()),
                 "重复请求改变了规范快照");
         Reservation queued = reservationOf(registry, "APP-030");
-        require(queued.offsetMillis() == 2000 && queued.logicalSequence() == 2,
-                "重复请求改动了排序键：offset=" + queued.offsetMillis()
-                        + " seq=" + queued.logicalSequence());
+        require(queued.requestedOffsetMillis() == 2000 && queued.requestedLogicalSequence() == 2,
+                "重复请求改动了排序键：offset=" + queued.requestedOffsetMillis()
+                        + " seq=" + queued.requestedLogicalSequence());
         require(waitingOrder(registry, "R01").equals(List.of("APP-030", "APP-020")),
                 "重复请求改动了队列：=" + waitingOrder(registry, "R01"));
 
         String beforeHeld = registry.resourceWorldSnapshot().canonicalText();
         ReservationDecision duplicateHeld = request(registry, "APP-001", 8888, 88);
-        require(duplicateHeld.outcome() == ReservationDecision.Outcome.IDEMPOTENT,
-                "HELD 重复请求 outcome=" + duplicateHeld.outcome());
+        require(duplicateHeld.type() == ReservationDecision.DecisionType.IDEMPOTENT,
+                "HELD 重复请求 type=" + duplicateHeld.type());
         require(beforeHeld.equals(registry.resourceWorldSnapshot().canonicalText()),
                 "HELD 重复请求改变了规范快照");
-        require(reservationOf(registry, "APP-001").offsetMillis() == 1000,
+        require(reservationOf(registry, "APP-001").requestedOffsetMillis() == 1000,
                 "HELD 重复请求改动了排序键");
     }
 
@@ -227,13 +227,16 @@ public final class ResourceScenarioChecks {
         request(registry, "APP-001", 1000, 1);
 
         String before = registry.resourceWorldSnapshot().canonicalText();
+        ReservationDecision decision;
         try {
-            registry.requestReservation("APP-001", "D02", "SP02", "R02", 2000, 2);
-            throw new AssertionError("同申请不同目标未抛 RESERVATION_CONFLICT");
-        } catch (RegistryException e) {
-            require("RESERVATION_CONFLICT".equals(e.code()),
-                    "code=" + e.code() + " 期望 RESERVATION_CONFLICT");
+            decision = registry.requestReservation("APP-001", "D02", "SP02", "R02", 2000, 2);
+        } catch (RuntimeException e) {
+            throw new AssertionError("同申请不同目标抛异常 expected=无异常(CONFLICT) actual=" + e);
         }
+        require(decision.type() == ReservationDecision.DecisionType.CONFLICT,
+                "type=" + decision.type() + " 期望 CONFLICT");
+        require("reason=DIFFERENT_ACTIVE_TARGET".equals(decision.detail()),
+                "detail=" + decision.detail() + " 期望 reason=DIFFERENT_ACTIVE_TARGET");
         require(before.equals(registry.resourceWorldSnapshot().canonicalText()),
                 "CONFLICT 后规范快照发生变化");
         require(stateOf(registry, "APP-001") == ReservationState.HELD,
@@ -256,8 +259,8 @@ public final class ResourceScenarioChecks {
         require(stateOf(registry, "APP-001") == ReservationState.HELD,
                 "disable 驱逐了 holder：APP-001=" + stateOf(registry, "APP-001"));
 
-        require(request(registry, "APP-002", 2000, 2).outcome()
-                        == ReservationDecision.Outcome.WAITING,
+        require(request(registry, "APP-002", 2000, 2).type()
+                        == ReservationDecision.DecisionType.WAITING,
                 "DISABLED 期间的新请求应为 WAITING");
         registry.setVirtualResourceAvailability("R01", ResourceAvailability.ENABLED);
         require(stateOf(registry, "APP-001") == ReservationState.HELD,
@@ -381,8 +384,9 @@ public final class ResourceScenarioChecks {
                 reservation("APP-002", ReservationState.WAITING, 2000, 2)));
         ResourceStep goodStep = step("EVT-001", ScenarioEvent.Action.RESERVATION_REQUEST,
                 "R01", "", ResourceWorldSnapshot.empty(), goodWorld,
-                new ReservationDecision(ReservationDecision.Outcome.HELD,
-                        reservation("APP-001", ReservationState.HELD, 1000, 1)));
+                new ReservationDecision(ReservationDecision.DecisionType.HELD,
+                        reservation("APP-001", ReservationState.HELD, 1000, 1),
+                        "reason=RESOURCE_AVAILABLE"));
         RestartPair goodPair = new RestartPair("EVT-009", "a".repeat(64), "a".repeat(64));
         for (OracleResult result : ResourceInvariantOracle.check(
                 goodWorld, List.of(goodStep), List.of(goodPair))) {
@@ -437,12 +441,14 @@ public final class ResourceScenarioChecks {
                 reservation("APP-001", ReservationState.HELD, 3000, 9)));
         ResourceStep firstRequest = step("EVT-006", ScenarioEvent.Action.RESERVATION_REQUEST,
                 "R01", "", ResourceWorldSnapshot.empty(), heldOld,
-                new ReservationDecision(ReservationDecision.Outcome.HELD,
-                        reservation("APP-001", ReservationState.HELD, 2000, 1)));
+                new ReservationDecision(ReservationDecision.DecisionType.HELD,
+                        reservation("APP-001", ReservationState.HELD, 2000, 1),
+                        "reason=RESOURCE_AVAILABLE"));
         ResourceStep duplicate = step("EVT-007", ScenarioEvent.Action.RESERVATION_REQUEST,
                 "R01", "", heldOld, heldMoved,
-                new ReservationDecision(ReservationDecision.Outcome.IDEMPOTENT,
-                        reservation("APP-001", ReservationState.HELD, 2000, 1)));
+                new ReservationDecision(ReservationDecision.DecisionType.IDEMPOTENT,
+                        reservation("APP-001", ReservationState.HELD, 2000, 1),
+                        "reason=SAME_ACTIVE_RESERVATION"));
         expectFail(heldMoved, List.of(firstRequest, duplicate), List.of(),
                 "ORC-RES-SYS-004", "幂等请求重排");
 
@@ -561,14 +567,14 @@ public final class ResourceScenarioChecks {
         registry.registerPoint("P01", "原料暂存点");
         registry.registerPoint("P02", "装配线接收点");
         registry.addDestination("D01", "一号目的地");
-        registry.addServicePoint("SP01", "D01", "P01", "一号服务点");
+        registry.addServicePoint("SP01", "D01", "P01");
         registry.addVirtualResource("R01", "SP01");
         return registry;
     }
 
     private static void addSecondTarget(Registry registry) {
         registry.addDestination("D02", "二号目的地");
-        registry.addServicePoint("SP02", "D02", "P01", "二号服务点");
+        registry.addServicePoint("SP02", "D02", "P01");
         registry.addVirtualResource("R02", "SP02");
     }
 
@@ -654,7 +660,7 @@ public final class ResourceScenarioChecks {
     private static ResourceWorldSnapshot snapshot(List<Reservation> reservations) {
         return new ResourceWorldSnapshot(
                 List.of(new Destination("D01", "一号目的地")),
-                List.of(new ServicePoint("SP01", "D01", "P01", "一号服务点")),
+                List.of(new ServicePoint("SP01", "D01", "P01")),
                 List.of(new VirtualResource("R01", "SP01")),
                 reservations);
     }

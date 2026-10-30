@@ -224,7 +224,7 @@ public final class ResourceStorageChecks {
     private static ResourceWorldSnapshot sampleWorld() {
         return new ResourceWorldSnapshot(
                 List.of(new Destination("D01", "一号目的地")),
-                List.of(new ServicePoint("SP01", "D01", "P01", "一号服务点")),
+                List.of(new ServicePoint("SP01", "D01", "P01")),
                 List.of(new VirtualResource("R01", "SP01")),
                 List.of(new Reservation("RSV-APP-001", "APP-001", "D01", "SP01", "R01",
                         ReservationState.HELD, 0, 10)));

@@ -97,7 +97,7 @@ ACCEPTED 和 TIMEOUT_BUT_CREATED 必须提供 externalOrderId；其余使用 `-`
 | WORKFLOW_START | 1 | applicationId |
 | WORKFLOW_ADVANCE | 1 | applicationId |
 | DESTINATION_ADD | 2 | destinationId, name |
-| SERVICE_POINT_ADD | 4 | servicePointId, destinationId, registryPointId, name |
+| SERVICE_POINT_ADD | 3 | servicePointId, destinationId, pointId |
 | VIRTUAL_RESOURCE_ADD | 2 | resourceId, servicePointId |
 | RESOURCE_SET | 2 | resourceId, ENABLED/DISABLED |
 | RESERVATION_REQUEST | 4 | applicationId, destinationId, servicePointId, resourceId |
@@ -229,7 +229,7 @@ ACCEPTED 和 TIMEOUT_BUT_CREATED 必须提供 externalOrderId；其余使用 `-`
 | oracleId | ruleType | 真实计算口径 |
 |---|---|---|
 | ORC-RES-SYS-001 | SINGLE_CAPACITY | 任一观察点上同一资源最多一个 HELD |
-| ORC-RES-SYS-002 | QUEUE_ORDER | WAITING 按 `offset → logicalSequence → applicationId` 升序；晋升只能取队首 |
+| ORC-RES-SYS-002 | QUEUE_ORDER | WAITING 按 `requestedOffsetMillis → requestedLogicalSequence → applicationId` 升序；晋升只能取队首 |
 | ORC-RES-SYS-003 | TERMINAL_MONOTONIC | RELEASED / CANCELLED 之后不得再变回非终态 |
 | ORC-RES-SYS-004 | IDEMPOTENT_STABLE | IDEMPOTENT 请求前后，预约编号、状态与排序键逐字段不变 |
 | ORC-RES-SYS-005 | DISABLE_KEEPS_HOLDER | `RESOURCE_SET ... DISABLED` 前后该资源的 HELD 持有者集合不变 |

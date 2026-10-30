@@ -38,29 +38,29 @@ public final class ResourceWorldChecks {
     private static final String INTENT_03 =
             "ServicePoint 正常新增：引用已存在的 Destination 与 Registry Point，规范快照可读";
     private static final String INTENT_04 =
-            "ServicePoint 缺 Destination → RESOURCE_UNKNOWN_DESTINATION，且无幽灵条目";
+            "ServicePoint 缺 Destination → RESOURCE_DESTINATION_NOT_FOUND，且无幽灵条目";
     private static final String INTENT_05 =
             "ServicePoint 缺 Registry Point → UNKNOWN_POINT，且无幽灵条目";
     private static final String INTENT_06 =
             "VirtualResource 默认 ENABLED：新增即启用，可立刻被请求 HELD";
     private static final String INTENT_07 =
-            "VirtualResource 缺 ServicePoint → RESOURCE_UNKNOWN_SERVICE_POINT；同 ID 不同引用 → RESOURCE_DUPLICATE_CONFLICT";
+            "VirtualResource 缺 ServicePoint → RESOURCE_SERVICE_POINT_NOT_FOUND；同 ID 不同引用 → RESOURCE_DUPLICATE_CONFLICT";
     private static final String INTENT_08 =
-            "request 的 application 必须存在 → UNKNOWN_APPLICATION";
+            "request 的 application 必须存在 → RESERVATION_APPLICATION_NOT_FOUND";
     private static final String INTENT_09 =
             "request 的 application 必须是 CREATED → RESERVATION_APPLICATION_STATE";
     private static final String INTENT_10 =
             "Destination→ServicePoint→Resource 引用链必须一致，否则 RESOURCE_TARGET_MISMATCH";
     private static final String INTENT_11 =
-            "空闲且 ENABLED 的资源：请求立刻 HELD，决策 outcome=HELD";
+            "空闲且 ENABLED 的资源：请求立刻 HELD，决策 type=HELD";
     private static final String INTENT_12 =
-            "已被占用的资源：第二个请求进 WAITING，决策 outcome=WAITING";
+            "已被占用的资源：第二个请求进 WAITING，决策 type=WAITING";
     private static final String INTENT_13 =
-            "队列按 offset → logicalSequence → applicationId 稳定排序（与请求先后无关）";
+            "队列按 requestedOffsetMillis → requestedLogicalSequence → applicationId 稳定排序（与请求先后无关）";
     private static final String INTENT_14 =
             "完全相同重复 request → IDEMPOTENT，条目不增、原排序键不变";
     private static final String INTENT_15 =
-            "同申请不同目标 → RESERVATION_CONFLICT，状态与快照不变";
+            "同申请不同目标 → CONFLICT 决策（不抛异常），状态与快照不变";
     private static final String INTENT_16 =
             "release 后晋升队首：释放者 RELEASED，队列最小键变 HELD";
     private static final String INTENT_17 =
@@ -171,14 +171,14 @@ public final class ResourceWorldChecks {
     private static void rw03() {
         Registry registry = registryWithChain();
 
-        ServicePoint added = registry.addServicePoint("SP02", "D01", "P02", "二号服务点");
+        ServicePoint added = registry.addServicePoint("SP02", "D01", "P02");
 
         require(added.servicePointId().equals("SP02"), "servicePointId=" + added.servicePointId());
         require(added.destinationId().equals("D01"), "destinationId=" + added.destinationId());
-        require(added.registryPointId().equals("P02"), "registryPointId=" + added.registryPointId());
+        require(added.pointId().equals("P02"), "pointId=" + added.pointId());
         require(servicePoints(registry).size() == 2,
                 "ServicePoint 条目数=" + servicePoints(registry).size() + " 期望=2");
-        require(canonical(registry).contains("S|SP02|D01|P02|二号服务点"),
+        require(canonical(registry).contains("S|SP02|D01|P02"),
                 "规范快照缺少 SP02 行：\n" + canonical(registry));
     }
 
@@ -189,8 +189,8 @@ public final class ResourceWorldChecks {
         Registry registry = registryWithChain();
         String before = canonical(registry);
 
-        expectRegistryFailure(() -> registry.addServicePoint("SP09", "D99", "P01", "孤儿服务点"),
-                "RESOURCE_UNKNOWN_DESTINATION", "D99", "缺 Destination");
+        expectRegistryFailure(() -> registry.addServicePoint("SP09", "D99", "P01"),
+                "RESOURCE_DESTINATION_NOT_FOUND", "D99", "缺 Destination");
 
         require(canonical(registry).equals(before), "拒绝后出现了幽灵 ServicePoint：\n" + canonical(registry));
         require(servicePoints(registry).size() == 1,
@@ -204,7 +204,7 @@ public final class ResourceWorldChecks {
         Registry registry = registryWithChain();
         String before = canonical(registry);
 
-        expectRegistryFailure(() -> registry.addServicePoint("SP09", "D01", "P99", "孤儿服务点"),
+        expectRegistryFailure(() -> registry.addServicePoint("SP09", "D01", "P99"),
                 "UNKNOWN_POINT", "P99", "缺 Registry Point");
 
         require(canonical(registry).equals(before), "拒绝后出现了幽灵 ServicePoint：\n" + canonical(registry));
@@ -225,8 +225,8 @@ public final class ResourceWorldChecks {
         require(resource(registry, "R02").availability() == ResourceAvailability.ENABLED,
                 "快照中 R02 可用性=" + resource(registry, "R02").availability());
         ReservationDecision decision = registry.requestReservation("APP-001", "D01", "SP01", "R02", 0, 10);
-        require(decision.outcome() == ReservationDecision.Outcome.HELD,
-                "对默认 ENABLED 资源的请求 outcome=" + decision.outcome() + " 期望=HELD");
+        require(decision.type() == ReservationDecision.DecisionType.HELD,
+                "对默认 ENABLED 资源的请求 type=" + decision.type() + " 期望=HELD");
     }
 
     // ================= RW-07 =================
@@ -235,11 +235,11 @@ public final class ResourceWorldChecks {
     private static void rw07() {
         Registry registry = registryWithChain();
         registry.addDestination("D02", "二号目的地");
-        registry.addServicePoint("SP02", "D02", "P02", "二号服务点");
+        registry.addServicePoint("SP02", "D02", "P02");
         String before = canonical(registry);
 
         expectRegistryFailure(() -> registry.addVirtualResource("R09", "SP99"),
-                "RESOURCE_UNKNOWN_SERVICE_POINT", "SP99", "缺 ServicePoint");
+                "RESOURCE_SERVICE_POINT_NOT_FOUND", "SP99", "缺 ServicePoint");
 
         expectRegistryFailure(() -> registry.addVirtualResource("R01", "SP02"),
                 "RESOURCE_DUPLICATE_CONFLICT", "R01", "同 ID 不同 ServicePoint");
@@ -258,7 +258,7 @@ public final class ResourceWorldChecks {
 
         expectRegistryFailure(
                 () -> registry.requestReservation("APP-404", "D01", "SP01", "R01", 0, 10),
-                "UNKNOWN_APPLICATION", "APP-404", "不存在的申请");
+                "RESERVATION_APPLICATION_NOT_FOUND", "APP-404", "不存在的申请");
 
         require(canonical(registry).equals(before), "失败请求留下了幽灵预约：\n" + canonical(registry));
         require(reservations(registry).isEmpty(),
@@ -290,7 +290,7 @@ public final class ResourceWorldChecks {
     private static void rw10() {
         Registry registry = registryWithChain();
         registry.addDestination("D02", "二号目的地");
-        registry.addServicePoint("SP02", "D02", "P02", "二号服务点");
+        registry.addServicePoint("SP02", "D02", "P02");
         registry.addVirtualResource("R02", "SP02");
         String before = canonical(registry);
 
@@ -302,7 +302,7 @@ public final class ResourceWorldChecks {
                 "RESOURCE_TARGET_MISMATCH", "APP-001", "SP01 属于 D01 却按 D02 请求");
         expectRegistryFailure(
                 () -> registry.requestReservation("APP-001", "D01", "SP01", "R99", 0, 10),
-                "RESOURCE_UNKNOWN_RESOURCE", "R99", "不存在的资源");
+                "RESOURCE_NOT_FOUND", "R99", "不存在的资源");
 
         require(canonical(registry).equals(before), "失败请求留下了幽灵预约：\n" + canonical(registry));
     }
@@ -315,8 +315,8 @@ public final class ResourceWorldChecks {
 
         ReservationDecision decision = registry.requestReservation("APP-001", "D01", "SP01", "R01", 0, 10);
 
-        require(decision.outcome() == ReservationDecision.Outcome.HELD,
-                "outcome=" + decision.outcome() + " 期望=HELD");
+        require(decision.type() == ReservationDecision.DecisionType.HELD,
+                "type=" + decision.type() + " 期望=HELD");
         require(decision.reservation().state() == ReservationState.HELD,
                 "决策中的预约状态=" + decision.reservation().state() + " 期望=HELD");
         require(decision.reservation().reservationId().equals("RSV-APP-001"),
@@ -338,8 +338,8 @@ public final class ResourceWorldChecks {
 
         ReservationDecision decision = registry.requestReservation("APP-002", "D01", "SP01", "R01", 10, 10);
 
-        require(decision.outcome() == ReservationDecision.Outcome.WAITING,
-                "outcome=" + decision.outcome() + " 期望=WAITING");
+        require(decision.type() == ReservationDecision.DecisionType.WAITING,
+                "type=" + decision.type() + " 期望=WAITING");
         require(stateOf(registry, "APP-002") == ReservationState.WAITING,
                 "快照中状态=" + stateOf(registry, "APP-002") + " 期望=WAITING");
         require(heldOf(registry, "R01").equals(List.of("APP-001")),
@@ -378,18 +378,18 @@ public final class ResourceWorldChecks {
         int before = reservations(registry).size();
 
         ReservationDecision exact = registry.requestReservation("APP-001", "D01", "SP01", "R01", 100, 20);
-        require(exact.outcome() == ReservationDecision.Outcome.IDEMPOTENT,
-                "完全相同重复 request outcome=" + exact.outcome() + " 期望=IDEMPOTENT");
+        require(exact.type() == ReservationDecision.DecisionType.IDEMPOTENT,
+                "完全相同重复 request type=" + exact.type() + " 期望=IDEMPOTENT");
 
         ReservationDecision later = registry.requestReservation("APP-001", "D01", "SP01", "R01", 200, 30);
-        require(later.outcome() == ReservationDecision.Outcome.IDEMPOTENT,
-                "同目标后到 request outcome=" + later.outcome() + " 期望=IDEMPOTENT");
+        require(later.type() == ReservationDecision.DecisionType.IDEMPOTENT,
+                "同目标后到 request type=" + later.type() + " 期望=IDEMPOTENT");
 
         require(reservations(registry).size() == before,
                 "预约条数=" + reservations(registry).size() + " 期望=" + before);
         Reservation kept = reservationOf(registry, "APP-001");
-        require(kept.offsetMillis() == 100L && kept.logicalSequence() == 20L,
-                "排序键被改了：offset=" + kept.offsetMillis() + " seq=" + kept.logicalSequence()
+        require(kept.requestedOffsetMillis() == 100L && kept.requestedLogicalSequence() == 20L,
+                "排序键被改了：offset=" + kept.requestedOffsetMillis() + " seq=" + kept.requestedLogicalSequence()
                         + " 期望=100/20");
         require(kept.state() == ReservationState.WAITING, "状态=" + kept.state() + " 期望=WAITING");
         require(queueOf(registry, "R01").equals(List.of("APP-001")),
@@ -398,19 +398,26 @@ public final class ResourceWorldChecks {
 
     // ================= RW-15 =================
 
-    /** 同申请不同目标冲突。 */
+    /** 同申请不同目标 → CONFLICT 决策（不抛异常），快照与状态不变。 */
     private static void rw15() {
         Registry registry = registryWithChain();
         registry.addDestination("D02", "二号目的地");
-        registry.addServicePoint("SP02", "D02", "P02", "二号服务点");
+        registry.addServicePoint("SP02", "D02", "P02");
         registry.addVirtualResource("R02", "SP02");
         registry.requestReservation("APP-009", "D01", "SP01", "R01", 0, 10);
         registry.requestReservation("APP-001", "D01", "SP01", "R01", 10, 10);
         String before = canonical(registry);
 
-        expectRegistryFailure(
-                () -> registry.requestReservation("APP-001", "D02", "SP02", "R02", 20, 10),
-                "RESERVATION_CONFLICT", "APP-001", "同申请换目标");
+        ReservationDecision[] decision = new ReservationDecision[1];
+        Throwable failure = capture(
+                () -> decision[0] = registry.requestReservation("APP-001", "D02", "SP02", "R02", 20, 10));
+        require(failure == null, "同申请换目标抛异常 expected=无异常(CONFLICT) actual=" + failure);
+        require(decision[0].type() == ReservationDecision.DecisionType.CONFLICT,
+                "type=" + decision[0].type() + " 期望=CONFLICT");
+        require(decision[0].reservation().applicationId().equals("APP-001"),
+                "CONFLICT 决策应携带原有预约 applicationId=" + decision[0].reservation().applicationId());
+        require("reason=DIFFERENT_ACTIVE_TARGET".equals(decision[0].detail()),
+                "CONFLICT detail=" + decision[0].detail() + " 期望=reason=DIFFERENT_ACTIVE_TARGET");
 
         require(canonical(registry).equals(before), "冲突后快照变了：\nbefore=" + before
                 + "\nafter=" + canonical(registry));
@@ -489,8 +496,8 @@ public final class ResourceWorldChecks {
 
         ReservationDecision decision = registry.requestReservation("APP-001", "D01", "SP01", "R01", 0, 10);
 
-        require(decision.outcome() == ReservationDecision.Outcome.WAITING,
-                "outcome=" + decision.outcome() + " 期望=WAITING（资源 DISABLED）");
+        require(decision.type() == ReservationDecision.DecisionType.WAITING,
+                "type=" + decision.type() + " 期望=WAITING（资源 DISABLED）");
         require(stateOf(registry, "APP-001") == ReservationState.WAITING,
                 "状态=" + stateOf(registry, "APP-001") + " 期望=WAITING");
         require(heldOf(registry, "R01").isEmpty(), "HELD 列表=" + heldOf(registry, "R01") + " 期望=[]");
@@ -513,8 +520,8 @@ public final class ResourceWorldChecks {
                 "disable 后 HELD 列表=" + heldOf(registry, "R01") + " 期望=[APP-009]（不得驱逐）");
 
         ReservationDecision decision = registry.requestReservation("APP-001", "D01", "SP01", "R01", 10, 10);
-        require(decision.outcome() == ReservationDecision.Outcome.WAITING,
-                "disable 后新请求 outcome=" + decision.outcome() + " 期望=WAITING");
+        require(decision.type() == ReservationDecision.DecisionType.WAITING,
+                "disable 后新请求 type=" + decision.type() + " 期望=WAITING");
     }
 
     // ================= RW-21 =================
@@ -678,7 +685,7 @@ public final class ResourceWorldChecks {
             registry.registerApplication(String.format("APP-%03d", i), "P01", "P02");
         }
         registry.addDestination("D01", "一号目的地");
-        registry.addServicePoint("SP01", "D01", "P01", "一号服务点");
+        registry.addServicePoint("SP01", "D01", "P01");
         registry.addVirtualResource("R01", "SP01");
     }
 

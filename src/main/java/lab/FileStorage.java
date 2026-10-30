@@ -203,8 +203,7 @@ public class FileStorage implements Storage {
         for (ServicePoint servicePoint : world.servicePoints()) {
             builder.append("S|").append(servicePoint.servicePointId()).append('|')
                     .append(servicePoint.destinationId()).append('|')
-                    .append(servicePoint.registryPointId()).append('|')
-                    .append(servicePoint.name()).append('\n');
+                    .append(servicePoint.pointId()).append('\n');
         }
         for (VirtualResource resource : world.resources()) {
             builder.append("R|").append(resource.resourceId()).append('|')
@@ -218,8 +217,8 @@ public class FileStorage implements Storage {
                     .append(reservation.servicePointId()).append('|')
                     .append(reservation.resourceId()).append('|')
                     .append(reservation.state().name()).append('|')
-                    .append(reservation.offsetMillis()).append('|')
-                    .append(reservation.logicalSequence()).append('\n');
+                    .append(reservation.requestedOffsetMillis()).append('|')
+                    .append(reservation.requestedLogicalSequence()).append('\n');
         }
         return builder.toString();
     }
@@ -357,8 +356,8 @@ public class FileStorage implements Storage {
                     destinations.add(new Destination(parts[1], parts[2]));
                 }
                 case "S" -> {
-                    requireFields(parts, 5, "S");
-                    servicePoints.add(new ServicePoint(parts[1], parts[2], parts[3], parts[4]));
+                    requireFields(parts, 4, "S");
+                    servicePoints.add(new ServicePoint(parts[1], parts[2], parts[3]));
                 }
                 case "R" -> {
                     requireFields(parts, 4, "R");
@@ -369,8 +368,8 @@ public class FileStorage implements Storage {
                     requireFields(parts, 9, "V");
                     reservations.add(new Reservation(parts[1], parts[2], parts[3], parts[4], parts[5],
                             parseReservationState(parts[6]),
-                            parseLong(parts[7], "offsetMillis"),
-                            parseLong(parts[8], "logicalSequence")));
+                            parseLong(parts[7], "requestedOffsetMillis"),
+                            parseLong(parts[8], "requestedLogicalSequence")));
                 }
                 default -> throw new RuntimeException(
                         "cannot read resource world: unknown record " + parts[0]);
